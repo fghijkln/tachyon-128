@@ -1,0 +1,21 @@
+# Fast variant: generic gates via techmap only (no ABC), hierarchy kept for a per-module breakdown.
+script synth/read.ys
+proc
+
+opt_expr
+opt_clean
+opt -nodffe -nosdff
+memory -nomap
+opt -full
+wreduce
+peepopt
+alumacc
+share
+opt
+memory -nomap
+opt -fast
+techmap
+opt -fast
+
+opt_clean
+tee -o build/synth_stat_techmap.txt stat -top tx_core
