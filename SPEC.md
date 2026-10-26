@@ -16,6 +16,7 @@
 - **三大“科幻但可靠”的特色（全部在 RTL 中实现并验证）**：
   1. **硬件能力指针（CHERI 风格）**：每个寄存器带隐藏的 tag 位 + 权限 + 基址 + 上界（“胖寄存器”）。经过带 tag 的指针访存时，硬件检查权限和边界；能力只能单调缩小（不能扩大边界、不能增加权限），普通整数运算会清除 tag，因此指针无法伪造。复位时 r63（`rc`）持有根能力。
      **v2 带标签内存**：每 16 字节粒度一个影子 tag 位 + 元数据，`csc`/`clc` 可把能力完整地存入/取出内存（需 STORE_CAP/LOAD_CAP 权限），任何普通数据写入都会清除该粒度的 tag。
+     **v2 PCC**：取指受程序计数器能力（PCC）检查（越界或无 EXEC 权限即陷入），`cjalr` 通过能力寄存器跳转并设置 PCC，同时返回链接能力。
   2. **寄存器内 SIMD 通道**：一个 128 位寄存器可视为 16×8 / 8×16 / 4×32 / 2×64 位通道，支持加减、饱和加减、min/max、比较掩码、乘法、广播、横向求和、通道移位。
   3. **宽立即数 / 常量拼接**：`wli`/`wins` 把 16 位立即数放到 8 个槽位中任意一个，汇编器的 `li` 伪指令自动选出最短序列。
 - **异常**：非法指令、能力错误（tag/边界/权限）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
@@ -182,7 +183,8 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 * `beq/bne/blt/bge/bltu/bgeu rs1, rs2, label` — compare rs1 with the register in field A; taken target = pc + 4·imm14.
 * `jal rd, label` — rd = pc + 4; pc = pc + 4·imm20.
 * `jalr rd, rs1, imm` — pc = (rs1 + imm) & ~3; rd = old pc + 4. Low two bits of every register-sourced
-  target (JALR, ERET, trap vector) are ignored.
+  target (JALR, CJALR, ERET, trap vector) are ignored.
+* `cjalr rd, rs1` — jump through a code capability, installing it as the PCC (§5.1.2).
 
 ### 4.5 System
 
@@ -203,14 +205,15 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 ### 5.1 Hardware capabilities (CHERI-inspired fat pointers)
 
 A *capability* is a register whose hidden tag is set. It grants access to `[base, top)` with permissions
-`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC — reserved, bit3 LOAD_CAP, bit4 STORE_CAP). Its value is the current address (cursor),
+`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC (instruction fetch, §5.1.2), bit3 LOAD_CAP, bit4 STORE_CAP). Its value is the current address (cursor),
 a full 128-bit address — bounds are stored at full precision in the side-band, so no address bits are
 sacrificed to compression, and a cursor may move out of bounds without losing the tag (it simply cannot
 be dereferenced there).
 
 **Unforgeability.** The only instructions that produce a tagged result are `csetaddr`, `cincaddr(i)`,
 `csetbnd(i)` and `candperm` (only when their `rs1` is already tagged) and `clc` (only from a granule whose
-shadow tag is set, which only `csc` of a tagged register can set). Every other write — ALU, ordinary load,
+shadow tag is set, which only `csc` of a tagged register can set); `cgetpcc` and the `cjalr` link copy the PCC,
+which itself only ever comes from root, a tagged register (`cjalr`, `csetepcc`) or EPCC. Every other write — ALU, ordinary load,
 `mv` (= `addi`), CSR read, link register — clears the tag, and every ordinary store clears the granule's
 tag. Tags therefore descend only from the root capability in `rc` at reset.
 
@@ -227,6 +230,9 @@ tag. Tags therefore descend only from the root capability in `rc` at reset.
 | 6 | `cgetperm rd, rs1` | perm |
 | 7 | `cgettag rd, rs1` | tag (0/1) |
 | 8 | `cclrtag rd, rs1` | value of rs1, untagged |
+| 9 | `cgetpcc rd` | rd = PCC (tagged) with cursor = pc of this instruction |
+| 10 | `csetepcc rs1` | EPCC := rs1's capability; rs1 untagged → *cap-tag*; rd is not written |
+| 11 | `cjalr rd, rs1` | capability jump, §5.1.2 |
 | — | `cincaddri rd, rs1, simm14` (op 0x11) | immediate form of `cincaddr` |
 | — | `csetbndi rd, rs1, uimm14` (op 0x12) | immediate form of `csetbnd` |
 
@@ -266,6 +272,36 @@ clc   t0, 0(t0)        # follow next: comes back tagged, with that node's 32-byt
 sq    t6, 96(s0)       # overwrite a link with an integer -> granule tag cleared, list is cut
 ```
 
+### 5.1.2 Program-counter capability (PCC) and `cjalr`
+
+Every instruction is fetched under the **PCC**, a capability (perm, base, top) that is always tagged.
+Reset: PCC = root (all permissions, `[0, 2^128)`). Before fetching the instruction at `pc` (checks in order;
+the trap has `tval = epc = pc`):
+
+1. PCC lacks EXEC → *capability-permission*
+2. `pc < PCC.base` or `pc + 4 > PCC.top` → *capability-bounds*
+3. `pc + 4 > RAM size` → *access-fault*
+
+Ordinary control transfers (`jal`, `jalr`, branches, sequential flow) keep the PCC: jumping or falling off the end
+of the PCC region traps at the next fetch. Only these change it:
+
+| Event | PCC effect |
+|---|---|
+| `cjalr rd, rs1` | rs1 untagged → *cap-tag*; rs1 lacks EXEC → *cap-permission* (both `tval` = rs1 cursor, nothing changes). Otherwise `pc ← rs1.cursor & ~3`, **PCC ← rs1's capability**, and `rd ←` a *link capability*: the old PCC with cursor `pc + 4`. `cjalr zero, ra` returns. The new target is bounds-checked by the next fetch. |
+| any trap (§6) | **EPCC ← PCC**, PCC ← root (handlers run with full authority) |
+| `eret` | PCC ← EPCC |
+| `csetepcc rs1` | EPCC ← rs1 (lets a handler choose the PCC it returns under) |
+
+`cgetpcc rd` reads the PCC. EPCC is reset to root. A pure-capability code region is entered with e.g.
+```
+la        t0, func
+csetaddr  t0, rc, t0
+csetbndi  t0, t0, 32       # func may only execute its own 8 instructions
+cjalr     ra, t0           # ra = link capability back into the caller's PCC
+...
+func: ...  cjalr zero, ra
+```
+
 ### 5.2 SIMD lanes inside a GPR
 
 `func8 = (sop << 2) | lane`, lane 0/1/2/3 = 8/16/32/64-bit lanes (assembler suffix `.b .h .w .d`).
@@ -303,8 +339,11 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 | 5 | misaligned | access not naturally aligned |
 | 6 | access-fault | data access outside RAM and MMIO; instruction fetch outside RAM (`tval` = pc) |
 
+Capability faults on instruction fetch (PCC lacks EXEC / pc outside PCC) use causes 4 / 3 with `tval` = pc;
+`cjalr` raises 2 / 4 for an untagged / non-executable target.
+
 Traps are **precise**: the trapping instruction has no architectural effect, everything older has completed.
-On a trap: `epc ← pc`, `cause`, `tval` are written; if `tvec ≠ 0` then `pc ← tvec & ~3`, otherwise the machine
+On a trap: `epc ← pc`, `cause`, `tval` are written, EPCC ← PCC and PCC ← root; if `tvec ≠ 0` then `pc ← tvec & ~3`, otherwise the machine
 halts reporting the cause. A handler resumes with `eret` (adding 4 to `epc` first to skip the instruction).
 
 ## 7. Memory map (v1 implementation)
@@ -332,7 +371,7 @@ label:  op operands      # comment   (';' also starts a comment)
 
 ## 9. Known limitations (deliberate)
 
-* No capability-checked instruction fetch (EXEC permission reserved), no sealed capabilities.
+* No sealed capabilities.
 * Single privilege level; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
 * No interrupts, no FPU, no atomics, no fence for self-modifying code.

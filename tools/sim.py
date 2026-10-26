@@ -106,6 +106,8 @@ class Machine:
         self.val[63], self.tag[63], self.meta[63] = 0, 1, (PERM_ALL, 0, TOP_MAX)
         self.pc = 0
         self.csr = [0] * NUM_CSRS
+        self.pcc = (PERM_ALL, 0, TOP_MAX)    # program-counter capability (always tagged)
+        self.epcc = (PERM_ALL, 0, TOP_MAX)   # PCC saved on trap, restored by eret
         self.mtag = {}              # shadow tag memory: granule index -> (perm, base, top) when tagged
         self.console = bytearray()
         self.trace = []
@@ -188,6 +190,11 @@ class Machine:
     # ---------------------------------------------------------------- one instruction
     def step(self):
         pc = self.pc
+        pperm, pbase, ptop = self.pcc
+        if not pperm & PERM_EXEC:
+            raise Trap(CAUSE_CAP_PERM, pc)
+        if pc < pbase or pc + 4 > ptop:
+            raise Trap(CAUSE_CAP_BOUNDS, pc)
         if pc + 4 > len(self.ram):
             raise Trap(CAUSE_ACCESS, pc)
         w = struct.unpack_from("<I", self.ram, pc)[0]
@@ -198,6 +205,7 @@ class Machine:
         npc = (pc + 4) & MASK
         wrote = None
         self._halt = None
+        self._new_pcc = self._new_epcc = None
 
         if op == OP_ALU:
             if func >= len(ALU_FUNCS):
@@ -234,7 +242,23 @@ class Machine:
         elif op == OP_CAP:
             if func >= len(CAP_FUNCS):
                 raise Trap(CAUSE_ILLEGAL, w)
-            wrote = self.cap_op(CAP_FUNCS[func], rd, rs1, x2)
+            fn = CAP_FUNCS[func]
+            if fn == "cgetpcc":
+                wrote = self.rd_write(rd, pc, 1, self.pcc)
+            elif fn == "csetepcc":
+                if not self.tag[rs1]:
+                    raise Trap(CAUSE_CAP_TAG, x1)
+                self._new_epcc = self.meta[rs1]
+            elif fn == "cjalr":
+                if not self.tag[rs1]:
+                    raise Trap(CAUSE_CAP_TAG, x1)
+                if not self.meta[rs1][0] & PERM_EXEC:
+                    raise Trap(CAUSE_CAP_PERM, x1)
+                npc = x1 & ~3
+                self._new_pcc = self.meta[rs1]
+                wrote = self.rd_write(rd, pc + 4, 1, self.pcc)    # link = PCC with cursor pc+4
+            else:
+                wrote = self.cap_op(fn, rd, rs1, x2)
         elif op in I_OPS.values():
             imm = f["imm14"]
             ui = imm & MASK
@@ -307,6 +331,7 @@ class Machine:
             self.csr[f["uimm14"]] = x1
         elif op == OP_ERET:
             npc = self.csr[1] & ~3
+            self._new_pcc = self.epcc
         else:
             raise Trap(CAUSE_ILLEGAL, w)
         return pc, npc, wrote
@@ -354,6 +379,7 @@ class Machine:
                 pc, npc, wrote = self.step()
             except Trap as tr:
                 self.csr[1], self.csr[2], self.csr[3] = self.pc, tr.cause, tr.tval
+                self.epcc, self.pcc = self.pcc, (PERM_ALL, 0, TOP_MAX)   # handler runs with the root PCC
                 self.trace.append(f"T {tr.cause} {self.pc:x} {tr.tval:x}")
                 if self.csr[0] == 0:
                     self.halted = ("trap", tr.cause)
@@ -369,6 +395,10 @@ class Machine:
             self.trace.append(self.trace_line(pc, wrote))
             self.retired += 1
             self.pc = npc
+            if self._new_pcc is not None:
+                self.pcc = self._new_pcc
+            if self._new_epcc is not None:
+                self.epcc = self._new_epcc
             if self._halt is not None:
                 self.halted, self.exit_code = ("exit", self._halt), self._halt
         if self.halted is None:

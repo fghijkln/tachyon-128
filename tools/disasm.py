@@ -68,6 +68,10 @@ def disasm(w, pc=0):
     rd, rs1, rs2 = rn(f["rd"]), rn(f["rs1"]), rn(f["rs2"])
     if kind in ("r", "v"):
         base = mn.split(".")[0]
+        if base in CAP_RD_ONLY:
+            return f"{mn} {rd}"
+        if base in CAP_RS1_ONLY:
+            return f"{mn} {rs1}"
         if base in ALU_UNARY or base in SIMD_UNARY or base in CAP_UNARY:
             return f"{mn} {rd}, {rs1}"
         return f"{mn} {rd}, {rs1}, {rs2}"

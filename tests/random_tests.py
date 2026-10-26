@@ -5,7 +5,8 @@ that skips faulting instructions, then a weighted random mix of every instructio
 ALU (R/I), SIMD (all lanes), MUL/DIV, capability ops, wide immediates, loads/stores of all
 sizes (through an untagged base, a bounded capability, and random bases -> faults), capability
 spills/reloads (clc/csc, incl. tag clearing by data stores and LOAD_CAP/STORE_CAP checks), forward
-branches, counted backward loops, JAL, CSR traffic and illegal words.  Sources are biased
+branches, counted backward loops, JAL, calls into PCC-bounded code regions through cjalr (incl.
+short bounds -> fetch faults, missing EXEC, untagged targets), CSR traffic and illegal words.  Sources are biased
 toward recently written registers to stress forwarding and interlocks.
 """
 import os
@@ -14,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 from isa import (ALU_FUNCS, ALU_UNARY, MULDIV_FUNCS, SIMD_FUNCS, SIMD_UNARY, LANE_SUFFIX,  # noqa: E402
-                 CAP_FUNCS, CAP_UNARY, LOAD_OPS, STORE_OPS, BRANCH_OPS)
+                 CAP_FUNCS, CAP_UNARY, CAP_RD_ONLY, CAP_RS1_ONLY, LOAD_OPS, STORE_OPS, BRANCH_OPS)
 
 POOL = list(range(4, 41))
 M = (1 << 128) - 1
@@ -60,9 +61,9 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3])[0]
-        if not allow_ctrl and k in ("br", "loop", "jal"):
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2])[0]
+        if not allow_ctrl and k in ("br", "loop", "jal", "cjalr"):
             k = "alu"
         if k == "alu":
             f = r.choice(ALU_FUNCS)
@@ -92,9 +93,13 @@ class Gen:
                 if d not in (a, b):
                     self.emit(f"{partner} r{self.dst()}, r{a}, r{b}")
         elif k == "cap":
-            f = r.choice(CAP_FUNCS + ["cincaddri", "csetbndi"])
+            f = r.choice([c for c in CAP_FUNCS if c != "cjalr"] + ["cincaddri", "csetbndi"])
             s1 = r.choice([60, 63, self.src(), self.src()])
-            if f in CAP_UNARY:
+            if f in CAP_RD_ONLY:
+                self.emit(f"{f} r{self.dst()}")
+            elif f in CAP_RS1_ONLY:
+                self.emit(f"{f} r{s1}")
+            elif f in CAP_UNARY:
                 self.emit(f"{f} r{self.dst()}, r{s1}")
             elif f == "cincaddri":
                 self.emit(f"cincaddri r{self.dst()}, r{s1}, {r.randint(-64, 64)}")
@@ -159,6 +164,26 @@ class Gen:
             for _ in range(r.randint(0, 3)):
                 self.one(allow_ctrl=False)
             self.out.append(f"{L}:")
+        elif k == "cjalr":          # call a PCC-bounded region through a code capability, return via link cap
+            Lt, Le, La = self.label(), self.label(), self.label()
+            self.emit(f"la r57, {Lt}")
+            self.emit("csetaddr r57, rc, r57")
+            size = f"{Le} - {Lt} + 4" if r.random() < 0.75 else f"({Le} - {Lt}) // 2"   # short -> fetch fault
+            self.emit(f"csetbndi r57, r57, {size}")
+            c = r.random()
+            if c < 0.1:
+                self.emit("li r56, 0x1B")            # no EXEC -> cap-permission at the cjalr
+                self.emit("candperm r57, r57, r56")
+            self.emit("cjalr r56, r0" if c > 0.93 else "cjalr r56, r57")   # untagged -> cap-tag
+            self.emit(f"j {La}")
+            self.out.append(f"{Lt}:")
+            for _ in range(r.randint(1, 8)):
+                self.one(allow_ctrl=False)
+            if r.random() < 0.3:
+                self.emit(f"cgetpcc r{self.dst()}")
+            self.out.append(f"{Le}:")
+            self.emit("cjalr r0, r56")
+            self.out.append(f"{La}:")
         elif k == "csr":
             if r.random() < 0.5:
                 self.emit(f"csrw scratch, r{self.src()}")
@@ -193,6 +218,10 @@ def gen_program(seed, n=None):
     g.out.append("handler:")
     g.emit("csrr r62, cause")
     g.emit("csrr r59, epc")
+    g.emit("csrr r58, tval")
+    g.emit("bne r58, r59, Hskip")
+    g.emit("csetepcc rc")             # fetch fault (tval == epc): resume under the root PCC
+    g.out.append("Hskip:")
     g.emit("addi r59, r59, 4")
     g.emit("csrw epc, r59")
     g.emit("eret")

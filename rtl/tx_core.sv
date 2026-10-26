@@ -82,8 +82,12 @@ module tx_core #(
   logic         halted_q, stop_fetch_q;
   logic [31:0]  exit_q;
   logic [127:0] pc_q;
+  // program-counter capabilities: fpcc = PCC used by fetch (updated at the cjalr redirect in EX),
+  // pcc = architectural PCC (updated when cjalr passes MEM), epcc = PCC saved by a trap
+  logic [MW-1:0] fpcc_q, pcc_q, epcc_q;
   // IF/ID
   logic         ifid_valid, ifid_fault;
+  logic [3:0]   ifid_fcause, idex_fcause;
   logic [127:0] ifid_pc;
   logic [31:0]  ifid_inst;
   // ID/EX
@@ -95,7 +99,8 @@ module tx_core #(
   // EX/MEM
   logic         exmem_valid, exmem_we, exmem_load, exmem_store, exmem_trap, exmem_csrr,
                 exmem_csrw, exmem_eret, exmem_halt, exmem_mmio, exmem_clc, exmem_csc, exmem_ldcap;
-  logic [MW-1:0] exmem_smeta;
+  logic [MW-1:0] exmem_smeta, exmem_tmeta;
+  logic         exmem_cjalr, exmem_setepcc;
   logic [127:0] exmem_pc, exmem_val, exmem_ea, exmem_sdata, exmem_tval;
   logic [MW-1:0] exmem_meta;
   logic [5:0]   exmem_rd, exmem_op;
@@ -132,7 +137,11 @@ module tx_core #(
   end
 
   // ======================================================================== IF
-  wire if_fault = |pc_q[127:RB];
+  wire [128:0] if_end   = {1'b0, pc_q} + 129'd4;
+  wire         if_noexec = ~fpcc_q[M_PERM + 2];
+  wire         if_oob    = (pc_q < fpcc_q[256:129]) | (if_end > fpcc_q[128:0]);
+  wire         if_fault  = if_noexec | if_oob | (|pc_q[127:RB]);
+  wire [3:0]   if_fcause = if_noexec ? C_CAP_PERM : (if_oob ? C_CAP_BOUNDS : C_ACCESS);
   assign imem_addr = pc_q;
 
   // ======================================================================== ID
@@ -145,7 +154,8 @@ module tx_core #(
                          id_k[K_HALT] | id_k[K_CSRW];
   wire         id_use2 = id_k[K_ALUR] | id_k[K_MD] | id_k[K_SIMD] | id_k[K_CAPR] | id_k[K_STORE] |
                          id_k[K_BR] | (id_k[K_WIDE] & ifid_inst[15]);
-  wire         id_we   = writes_rd(id_k) & (id_fa != 6'd0) & ~ifid_fault;
+  wire         id_csetepcc = id_k[K_CAPR] & (ifid_inst[27:24] == CF_CSETEPCC);
+  wire         id_we   = writes_rd(id_k) & (id_fa != 6'd0) & ~ifid_fault & ~id_csetepcc;
 
   // register read with WB write-through
   logic [127:0]  id_v1, id_v2;
@@ -259,6 +269,16 @@ module tx_core #(
       4'd5: cap_y = cap_len[128] ? {128{1'b1}} : cap_len[127:0];     // cgetlen
       4'd6: cap_y = {{(128-PW){1'b0}}, a_perm};                                // cgetperm
       4'd7: cap_y = {127'd0, a_tag};                                 // cgettag
+      CF_CGETPCC: begin cap_y = idex_pc; cap_m = pcc_q; end
+      CF_CSETEPCC: begin
+        cap_m = ma;
+        if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
+      end
+      CF_CJALR: begin                                                // link = PCC, cursor pc+4
+        cap_y = idex_pc + 128'd4; cap_m = pcc_q;
+        if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
+        else if (!a_perm[2]) begin cap_fault = 1'b1; cap_cause = C_CAP_PERM; end
+      end
       default: cap_y = a;                                            // cclrtag
     endcase
   end
@@ -315,8 +335,10 @@ module tx_core #(
   wire [127:0] br_target = idex_pc + (ex_imm << 2);
   wire [127:0] jalr_tgt  = (a + ex_imm) & ~128'd3;
   wire ex_mispred = ex_k[K_BR] & (br_taken != idex_pred);
-  wire ex_redirect = idex_valid & (ex_mispred | ex_k[K_JALR]);
-  wire [127:0] ex_target = ex_k[K_JALR] ? jalr_tgt : (br_taken ? br_target : ex_pc4);
+  wire ex_cjalr  = ex_k[K_CAPR] & (ex_fn[3:0] == CF_CJALR);
+  wire ex_setepcc = ex_k[K_CAPR] & (ex_fn[3:0] == CF_CSETEPCC);
+  wire ex_redirect = idex_valid & (ex_mispred | ex_k[K_JALR] | (ex_cjalr & ~cap_fault));
+  wire [127:0] ex_target = ex_cjalr ? (a & ~128'd3) : ex_k[K_JALR] ? jalr_tgt : (br_taken ? br_target : ex_pc4);
 
   // ---- result + trap select
   logic [127:0]  ex_val, ex_tval;
@@ -332,7 +354,7 @@ module tx_core #(
     else if (ex_k[K_JAL] | ex_k[K_JALR]) ex_val = ex_pc4;
     else if (ex_k[K_CSRW]) ex_val = a;                   // CSR write data rides in exmem_val
     ex_trap = 1'b0; ex_cause = C_ACCESS; ex_tval = '0;
-    if (idex_fault) begin ex_trap = 1'b1; ex_cause = C_ACCESS; ex_tval = idex_pc; end
+    if (idex_fault) begin ex_trap = 1'b1; ex_cause = idex_fcause; ex_tval = idex_pc; end
     else if (ex_k[K_ILL]) begin ex_trap = 1'b1; ex_cause = C_ILLEGAL; ex_tval = {96'd0, idex_inst}; end
     else if (is_mem && mem_fault) begin ex_trap = 1'b1; ex_cause = mem_cause; ex_tval = ea; end
     else if ((ex_k[K_CAPR] | ex_k[K_CAPI]) && cap_fault) begin ex_trap = 1'b1; ex_cause = cap_cause; ex_tval = a; end
@@ -388,6 +410,7 @@ module tx_core #(
   wire mem_eret      = mem_v & ~exmem_trap & exmem_eret;
   assign mem_redirect = mem_trap | mem_halt | mem_eret;
   wire [127:0] mem_target = mem_eret ? (csr_epc & ~128'd3) : (csr_tvec & ~128'd3);
+  wire [MW-1:0] mem_tpcc  = mem_eret ? epcc_q : ROOT_META;   // PCC after the MEM redirect
 
   // ======================================================================== control
   wire stall = stall_lu | stall_md;
@@ -396,6 +419,7 @@ module tx_core #(
   always_ff @(posedge clk) begin
     if (rst) begin
       pc_q <= '0; stop_fetch_q <= 1'b0; halted_q <= 1'b0; exit_q <= '0;
+      fpcc_q <= ROOT_META; pcc_q <= ROOT_META; epcc_q <= ROOT_META;
       ifid_valid <= 1'b0; idex_valid <= 1'b0; exmem_valid <= 1'b0; memwb_valid <= 1'b0;
       csr_tvec <= '0; csr_epc <= '0; csr_cause <= '0; csr_tval <= '0; csr_scratch <= '0;
     end else if (!halted_q) begin
@@ -406,6 +430,13 @@ module tx_core #(
       else if (id_redirect)  pc_q <= id_target;
       else if (!stop_fetch_q) pc_q <= pc_q + 128'd4;
       if (mem_halt | mem_trap_halt) stop_fetch_q <= 1'b1;
+      if (mem_redirect)     fpcc_q <= mem_tpcc;
+      else if (ex_redirect & ex_cjalr) fpcc_q <= ma;
+      // architectural PCC / EPCC (MEM stage)
+      if (mem_trap) begin epcc_q <= pcc_q; pcc_q <= ROOT_META; end
+      else if (mem_eret) pcc_q <= epcc_q;
+      else if (mem_v && exmem_cjalr) pcc_q <= exmem_tmeta;
+      else if (mem_v && exmem_setepcc) epcc_q <= exmem_tmeta;
 
       // ---------------- IF/ID
       if (mem_redirect | ex_redirect | (id_redirect & ~stall)) ifid_valid <= 1'b0;
@@ -414,6 +445,7 @@ module tx_core #(
         ifid_pc    <= pc_q;
         ifid_inst  <= imem_rdata;
         ifid_fault <= if_fault;
+        ifid_fcause <= if_fcause;
       end
 
       // ---------------- ID/EX
@@ -422,7 +454,7 @@ module tx_core #(
       else if (stall_lu) idex_valid <= 1'b0;
       else begin
         idex_valid <= ifid_valid;
-        idex_pc <= ifid_pc; idex_inst <= ifid_inst; idex_fault <= ifid_fault;
+        idex_pc <= ifid_pc; idex_inst <= ifid_inst; idex_fault <= ifid_fault; idex_fcause <= ifid_fcause;
         idex_rs1 <= id_rs1; idex_rs2 <= id_rs2; idex_rd <= id_fa; idex_we <= id_we;
         idex_v1 <= id_v1; idex_v2 <= id_v2; idex_m1 <= id_m1; idex_m2 <= id_m2;
         idex_pred <= id_pred;
@@ -444,6 +476,9 @@ module tx_core #(
         exmem_mmio  <= in_mmio;
         exmem_sdata <= b;
         exmem_smeta <= mb;
+        exmem_tmeta <= ma;
+        exmem_cjalr <= ex_cjalr & ~ex_trap;
+        exmem_setepcc <= ex_setepcc & ~ex_trap;
         exmem_clc   <= is_clc;
         exmem_csc   <= is_csc;
         exmem_ldcap <= ~a_tag | a_perm[3];               // LOAD_CAP (or unchecked base)

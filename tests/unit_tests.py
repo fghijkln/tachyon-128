@@ -454,6 +454,99 @@ end:    nop
         csetbndi r22, r21, 16
         cgetbase r23, r22
 """ + POST + handler + DATA
+    # ---------------- PCC: capability-checked instruction fetch, cjalr
+    T["pcc_call"] = PRE + setup + """
+        cgetpcc r10              # root PCC, cursor = pc
+        cgetlen r11, r10
+        cgetperm r12, r10
+        la r6, func
+        csetaddr r13, rc, r6
+        csetbndi r13, r13, 32    # code capability: exactly func's 8 instructions
+        li r7, 0x05              # LOAD | EXEC
+        candperm r13, r13, r7
+        cjalr r1, r13            # call: PCC := r13, r1 = link capability
+        cgetpcc r14              # back under the root PCC
+        cgetlen r15, r14
+        cjalr r1, r13            # call again (link cap reused)
+        mv r16, r20
+        j after
+func:   cgetpcc r20              # PCC = [func, func+32), cursor = func
+        addi r21, r21, 1
+        cgetbase r22, r20
+        cgetlen r23, r20
+        beq r0, r0, f2           # branch inside the region
+        addi r24, r24, 1
+f2:     cgetperm r25, r20
+        cjalr r0, r1             # return through the link capability
+after:  addi r26, r26, 1
+""" + POST + handler + DATA
+    T["pcc_faults"] = PRE + """
+        la r4, phandler
+        csrw tvec, r4
+        la r6, short
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, 8     # covers only 2 of short's instructions
+        cjalr r1, r10            # -> runs 2 instructions, then fetch cap-bounds fault at short+8
+        addi r30, r30, 1
+        li r7, 0x03              # LOAD|STORE, no EXEC
+        candperm r11, r10, r7
+        cjalr r1, r11            # cap-permission trap at the cjalr (tval = target)
+        cjalr r1, r6             # untagged -> cap-tag trap
+        la r6, region
+        csetaddr r12, rc, r6
+        csetbndi r12, r12, 16
+        cjalr r1, r12            # region jumps out of its PCC with plain jalr -> fetch fault at target
+        addi r31, r31, 1
+        csetbndi r13, r12, 64    # widening -> cap-bounds trap (r13 stays untagged)
+        cjalr r1, r13            # -> cap-tag trap
+        addi r32, r32, 1
+        halt zero
+short:  addi r20, r20, 1
+        addi r21, r21, 1
+        addi r22, r22, 1         # fetch fault here (outside PCC)
+        cjalr r0, r1
+region: addi r23, r23, 1
+        la r8, outside
+        jalr r0, r8, 0           # target outside PCC: next fetch traps (epc = outside)
+        nop
+outside: addi r24, r24, 1
+        cjalr r0, r1
+phandler:
+        csrr r50, cause
+        csrr r51, epc
+        csrr r52, tval
+        addi r53, r53, 1
+        cgetpcc r54              # handler always runs under the root PCC
+        cgetlen r55, r54
+        bne r52, r51, notfetch   # fetch fault (tval == epc): continue under the root PCC
+        csetepcc rc
+        j  out
+notfetch: addi r51, r51, 4
+        csrw epc, r51
+out:    eret
+"""
+    T["pcc_eret_restore"] = PRE + """
+        la r4, h2
+        csrw tvec, r4
+        la r6, body
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, 32
+        cjalr r1, r10
+        cgetpcc r30
+        cgetlen r31, r30
+        csetepcc r5              # untagged -> cap-tag trap
+        halt zero
+body:   .word 0                  # illegal inside the restricted region
+        cgetpcc r20              # eret restored the restricted PCC
+        cgetlen r21, r20
+        cjalr r0, r1
+h2:     addi r53, r53, 1
+        cgetpcc r54
+        csrr r51, epc
+        addi r51, r51, 4
+        csrw epc, r51
+        eret
+"""
     T["mmio_exit"] = PRE + """
         li r4, -0x10000
         li r5, 'H'

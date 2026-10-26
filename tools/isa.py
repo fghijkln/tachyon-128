@@ -51,8 +51,10 @@ SIMD_UNARY = {"vsplat", "vsum"}
 LANE_SUFFIX = {"b": 0, "h": 1, "w": 2, "d": 3}     # 8, 16, 32, 64-bit lanes
 LANE_BITS = [8, 16, 32, 64]
 CAP_FUNCS = ["csetaddr", "cincaddr", "csetbnd", "candperm", "cgetbase", "cgetlen",
-             "cgetperm", "cgettag", "cclrtag"]
-CAP_UNARY = {"cgetbase", "cgetlen", "cgetperm", "cgettag", "cclrtag"}
+             "cgetperm", "cgettag", "cclrtag", "cgetpcc", "csetepcc", "cjalr"]
+CAP_UNARY = {"cgetbase", "cgetlen", "cgetperm", "cgettag", "cclrtag", "cjalr"}   # rd, rs1
+CAP_RD_ONLY = {"cgetpcc"}                                                     # rd
+CAP_RS1_ONLY = {"csetepcc"}                                                   # rs1
 
 I_OPS = {"addi": OP_ADDI, "andi": OP_ANDI, "ori": OP_ORI, "xori": OP_XORI, "slti": OP_SLTI,
          "sltiu": OP_SLTIU, "slli": OP_SLLI, "srli": OP_SRLI, "srai": OP_SRAI,

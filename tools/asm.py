@@ -185,6 +185,12 @@ class Assembler:
                 return [enc_r(OP_SIMD, R(ops[0]), R(ops[1]), 0, func)]
             need(3)
             return [enc_r(OP_SIMD, R(ops[0]), R(ops[1]), R(ops[2]), func)]
+        if mn in CAP_RD_ONLY:
+            need(1)
+            return [enc_r(OP_CAP, R(ops[0]), 0, 0, CAP_FUNCS.index(mn))]
+        if mn in CAP_RS1_ONLY:
+            need(1)
+            return [enc_r(OP_CAP, 0, R(ops[0]), 0, CAP_FUNCS.index(mn))]
         if mn in CAP_FUNCS:
             if mn in CAP_UNARY:
                 need(2)
