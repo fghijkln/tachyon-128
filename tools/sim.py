@@ -108,6 +108,7 @@ class Machine:
         self.csr = [0] * NUM_CSRS
         self.pcc = ROOT_META                 # program-counter capability (always tagged, never sealed)
         self.epcc = ROOT_META                # PCC saved on trap, restored by eret
+        self.mtimecmp = MASK                 # timer compare register (MMIO), reset all ones
         self.mtag = {}              # shadow tag memory: granule index -> (perm, base, top) when tagged
         self.console = bytearray()
         self.trace = []
@@ -148,9 +149,23 @@ class Machine:
     def load(self, rs1, ea, size, signed):
         kind = self.check_access(rs1, ea, size, False)
         if kind == "mmio":
-            return 0
-        v = int.from_bytes(self.ram[ea:ea + size], "little")
+            v = (self.mmio_word(ea) >> (8 * (ea & 15))) & ((1 << (8 * size)) - 1)
+        else:
+            v = int.from_bytes(self.ram[ea:ea + size], "little")
         return sext(v, 8 * size) & MASK if signed else v
+
+    def mmio_word(self, ea):
+        """16-byte MMIO register containing ea (reads)."""
+        base = ea & ~15
+        if base == MMIO_MTIME:
+            return self.retired             # instructions retired before this one
+        if base == MMIO_MTIMECMP:
+            return self.mtimecmp
+        return 0
+
+    def irq_pending(self):
+        st = self.csr[CSR_STATUS]
+        return bool(st & ST_IE) and bool(st & ST_TIE) and self.retired >= self.mtimecmp
 
     def store(self, rs1, ea, size, v):
         kind = self.check_access(rs1, ea, size, True)
@@ -162,6 +177,8 @@ class Machine:
                 self.console += f"{v:032x}\n".encode()
             elif ea == MMIO_EXIT:
                 raise Halt(v & 0xFFFFFFFF)
+            elif ea == MMIO_MTIMECMP:
+                self.mtimecmp = v
             return
         self.ram[ea:ea + size] = v.to_bytes(size, "little")
         self.mtag.pop(ea // GRANULE, None)     # any data store clears the granule's tag
@@ -170,7 +187,7 @@ class Machine:
         """clc: 128-bit value + tag/metadata from the shadow memory. Returns (value, tag, meta)."""
         kind = self.check_access(rs1, ea, 16, False)
         if kind == "mmio":
-            return 0, 0, NULL_META
+            return self.mmio_word(ea), 0, NULL_META
         v = int.from_bytes(self.ram[ea:ea + 16], "little")
         g = ea // GRANULE
         if g in self.mtag and (not self.tag[rs1] or self.meta[rs1][0] & PERM_LOAD_CAP):
@@ -336,10 +353,12 @@ class Machine:
         elif op == OP_CSRW:
             if f["uimm14"] >= NUM_CSRS:
                 raise Trap(CAUSE_ILLEGAL, w)
-            self.csr[f["uimm14"]] = x1
+            self.csr[f["uimm14"]] = x1 & STATUS_MASK if f["uimm14"] == CSR_STATUS else x1
         elif op == OP_ERET:
             npc = self.csr[1] & ~3
             self._new_pcc = self.epcc
+            st = self.csr[CSR_STATUS]       # IE <- PIE, PIE <- 1
+            self.csr[CSR_STATUS] = (st & ST_TIE) | ST_PIE | (ST_IE if st & ST_PIE else 0)
         else:
             raise Trap(CAUSE_ILLEGAL, w)
         return pc, npc, wrote
@@ -414,18 +433,29 @@ class Machine:
             line += f" {p} {b:x} {t:x} {o:x}"
         return line
 
+    def enter_trap(self, cause, tval):
+        """Common trap/interrupt entry: epc, cause, tval, EPCC, status.PIE <- IE, IE <- 0."""
+        st = self.csr[CSR_STATUS]
+        self.csr[CSR_STATUS] = (st & ST_TIE) | (ST_PIE if st & ST_IE else 0)
+        self.csr[1], self.csr[2], self.csr[3] = self.pc, cause, tval
+        self.epcc, self.pcc = self.pcc, ROOT_META   # handler runs with the root PCC
+        if self.csr[0] == 0:
+            self.halted = ("trap", cause)
+        else:
+            self.pc = self.csr[0] & MASK & ~3
+
     def run(self, max_steps=5_000_000):
         while self.halted is None and self.retired < max_steps:
+            if self.irq_pending():
+                # timer interrupt: taken before the next instruction (precise, epc = that instruction)
+                self.trace.append(f"I {IRQ_TIMER} {self.pc:x}")
+                self.enter_trap(IRQ_FLAG | IRQ_TIMER, 0)
+                continue
             try:
                 pc, npc, wrote = self.step()
             except Trap as tr:
-                self.csr[1], self.csr[2], self.csr[3] = self.pc, tr.cause, tr.tval
-                self.epcc, self.pcc = self.pcc, ROOT_META   # handler runs with the root PCC
                 self.trace.append(f"T {tr.cause} {self.pc:x} {tr.tval:x}")
-                if self.csr[0] == 0:
-                    self.halted = ("trap", tr.cause)
-                else:
-                    self.pc = self.csr[0] & MASK & ~3
+                self.enter_trap(tr.cause, tr.tval)
                 continue
             except Halt as h:
                 # MMIO exit store retires, then the machine stops

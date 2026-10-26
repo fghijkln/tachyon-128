@@ -643,6 +643,139 @@ h2:     addi r53, r53, 1
         clc r18, 16(r5)
         cgettag r19, r18
 """ + POST + handler + DATA
+    # ---------------- machine timer interrupt (mtime = retired-instruction count)
+    ihandler = """
+ihandler:
+        csrr r50, cause
+        bltz r50, isirq          # cause bit 127 = interrupt
+        csrr r51, epc
+        addi r51, r51, 4         # synchronous trap: skip the instruction
+        csrw epc, r51
+        addi r49, r49, 1
+        eret
+isirq:  csrr r51, epc            # interrupt: resume at epc itself
+        csrr r48, status         # IE = 0, PIE = 1 inside the handler
+        addi r47, r47, 1
+        li r52, -0x10000
+        lq r46, 0x30(r52)        # mtime
+        addi r46, r46, IDELTA
+        sq r46, 0x40(r52)        # re-arm mtimecmp
+        eret
+"""
+    isetup = """        la r4, ihandler
+        csrw tvec, r4
+        la r5, data
+        li r52, -0x10000
+        li r6, ICMP
+        sq r6, 0x40(r52)
+        li r7, 5                 # IE | TIE
+        csrw status, r7
+"""
+    def irq(body, cmp, delta):
+        return (PRE + f"        .equ ICMP, {cmp}\n        .equ IDELTA, {delta}\n" + isetup + body + POST
+                + ihandler + DATA)
+    T["irq_periodic"] = irq("""
+        li r20, 40
+iloop:  addi r21, r21, 3
+        add r22, r22, r21
+        addi r20, r20, -1
+        bnez r20, iloop
+        csrw status, r0          # disable
+        li r23, 99
+""", 15, 9)
+    T["irq_mixed"] = irq("""
+        li r20, 12
+mloop:  ld r10, 0(r5)            # loads, load-use
+        add r11, r10, r10
+        sq r11, 32(r5)           # stores
+        li r12, 0x123456789abcdef0123456789
+        li r13, 77
+        divu r14, r12, r13       # long divide in EX when the interrupt hits
+        remu r15, r12, r13
+        mul r16, r12, r13
+        lw r17, 2(r5)            # misaligned -> sync trap (interrupt may land right before it)
+        beq r0, r0, mfwd         # forward taken: mispredict
+        addi r18, r18, 1
+mfwd:   csetaddr r24, rc, r5
+        csetbndi r24, r24, 64
+        clc r25, 0(r5)
+        csc r24, 16(r5)
+        addi r20, r20, -1
+        bnez r20, mloop
+        csrw status, r0
+""", 20, 7)
+    T["irq_pcc"] = irq("""
+        la r6, ireg
+        csetaddr r30, rc, r6
+        csetbndi r30, r30, 40
+        li r20, 8
+ploop:  cjalr r1, r30            # interrupt may land on the cjalr itself (EPCC must be the caller's PCC)
+        addi r20, r20, -1
+        bnez r20, ploop
+        csrw status, r0
+        j pdone
+ireg:   cgetpcc r31              # inside the region: PCC restored by eret after an interrupt
+        cgetlen r32, r31
+        addi r33, r33, 1
+        addi r34, r34, 2
+        add r35, r35, r33
+        nop
+        nop
+        nop
+        nop
+        cjalr r0, r1
+pdone:  cgetpcc r36
+        cgetlen r37, r36
+""", 12, 5)
+    T["irq_enable_pending"] = irq("""
+        csrw status, r0          # disable before the deadline
+        li r20, 30
+eloop:  addi r20, r20, -1        # mtime passes mtimecmp while disabled
+        bnez r20, eloop
+        li r7, 1
+        csrw status, r7          # IE only: still masked (TIE = 0)
+        addi r21, r21, 1
+        li r7, 4
+        csrw status, r7          # TIE only: still masked (IE = 0)
+        addi r21, r21, 1
+        li r7, 7
+        csrw status, r7          # both -> interrupt right after this csrw retires
+        addi r22, r22, 1
+        csrr r23, status
+        csrw status, r0
+        csrr r24, status
+""", 10, 1000)
+    T["irq_mmio_regs"] = irq("""
+        csrw status, r0
+        lq r20, 0x30(r52)        # mtime = retired count
+        ld r21, 0x30(r52)
+        lbu r22, 0x30(r52)
+        lb r23, 0x31(r52)
+        lq r24, 0x40(r52)        # mtimecmp readback
+        li r6, -1
+        sd r6, 0x40(r52)         # sd: mtimecmp = zero-extended 64 bits
+        lq r25, 0x40(r52)
+        sq r0, 0x30(r52)         # mtime is read-only
+        lq r26, 0x30(r52)
+        sd r0, 0x48(r52)         # not the register base address: ignored
+        lq r27, 0x40(r52)
+        lw r28, 0x44(r52)
+        clc r29, 0x30(r52)       # clc from MMIO: value, untagged
+        csrw status, r6          # only bits [2:0] are writable
+        csrr r30, status
+        csrw status, r0
+""", 1 << 100, 1)
+    T["irq_nohandler"] = PRE + """
+        li r52, -0x10000
+        li r6, 6
+        sq r6, 0x40(r52)
+        li r7, 5
+        csrw status, r7
+        addi r10, r10, 1
+        addi r10, r10, 1
+        addi r10, r10, 1         # tvec = 0: the interrupt halts the machine
+        addi r10, r10, 1
+""" + POST
     T["mmio_exit"] = PRE + """
         li r4, -0x10000
         li r5, 'H'

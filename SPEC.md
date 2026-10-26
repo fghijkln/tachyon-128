@@ -20,7 +20,8 @@
      **v2 密封能力**：`cseal`/`cunseal` 用带 SEAL/UNSEAL 权限的授权能力（其游标即 otype）密封/解封；密封后的能力不能解引用、不能修改、不能跳转。
   2. **寄存器内 SIMD 通道**：一个 128 位寄存器可视为 16×8 / 8×16 / 4×32 / 2×64 位通道，支持加减、饱和加减、min/max、比较掩码、乘法、广播、横向求和、通道移位。
   3. **宽立即数 / 常量拼接**：`wli`/`wins` 把 16 位立即数放到 8 个槽位中任意一个，汇编器的 `li` 伪指令自动选出最短序列。
-- **异常**：非法指令、能力错误（tag/边界/权限）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
+- **异常**：非法指令、能力错误（tag/边界/权限/密封）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
+- **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
 - **实现**：Python 汇编器/反汇编器/黄金参考模拟器；SystemVerilog 五级流水线（前递、load-use 互锁、静态分支预测、迭代乘除法器带结果缓存），用 Verilator 与黄金模型逐条提交轨迹对比验证，用 Yosys 综合统计单元数。
 
@@ -193,7 +194,7 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 
 * `halt rs1` — stop the machine; exit code = rs1[31:0].
 * `csrr rd, csr` / `csrw csr, rs1` — read/write a 128-bit CSR (value only).
-* `eret` — pc = epc & ~3.
+* `eret` — pc = epc & ~3; PCC ← EPCC; `status.IE ← status.PIE`, `status.PIE ← 1`.
 
 | CSR | # | Meaning |
 |---|---|---|
@@ -202,6 +203,7 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 | `cause` | 2 | trap cause code |
 | `tval` | 3 | faulting address / instruction word / capability address |
 | `scratch` | 4 | free for the handler |
+| `status` | 5 | bit0 **IE** (global interrupt enable), bit1 **PIE** (IE before the last trap), bit2 **TIE** (timer interrupt enable); other bits read 0, writes to them are ignored |
 
 ## 5. Distinguishing features
 
@@ -263,7 +265,7 @@ metadata, not just the tag bit; ordinary loads cannot read it and ordinary store
 
 | Instruction | Semantics |
 |---|---|
-| `clc rd, imm(rs1)` | `ea = rs1 + sext(imm14)`; 16-byte access, checks as for `lq` (LOAD perm, bounds, 16-byte alignment, RAM/MMIO). `rd.value` = the 16 bytes; `rd` is **tagged with the granule's shadow metadata** if the granule's tag is set **and** (`rs1` is untagged **or** `rs1` has LOAD_CAP); otherwise `rd` is untagged (the tag is silently stripped, CHERI-style). MMIO reads return 0, untagged. |
+| `clc rd, imm(rs1)` | `ea = rs1 + sext(imm14)`; 16-byte access, checks as for `lq` (LOAD perm, bounds, 16-byte alignment, RAM/MMIO). `rd.value` = the 16 bytes; `rd` is **tagged with the granule's shadow metadata** if the granule's tag is set **and** (`rs1` is untagged **or** `rs1` has LOAD_CAP); otherwise `rd` is untagged (the tag is silently stripped, CHERI-style). MMIO reads return the MMIO register value (0 except the timer, §6.1), untagged. |
 | `csc rA, imm(rs1)` | `ea = rs1 + sext(imm14)`; 16-byte store of `rA.value`. Checks in order: (1) tagged `rs1` lacks STORE → cap-permission; (2) tagged `rs1` lacks STORE_CAP **and** `rA` is tagged → cap-permission; (3) bounds; (4) alignment; (5) RAM/MMIO. In RAM the granule's shadow entry becomes `rA`'s metadata if `rA` is tagged, else it is cleared. Stores to MMIO behave like `sq` (value only). |
 
 * Any successful `sb/sh/sw/sd/sq` to RAM clears the shadow tag of the granule written.
@@ -361,7 +363,7 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 
 | cause | Name | Raised by |
 |---|---|---|
-| 1 | illegal-instruction | undefined opcode/func, `vmul.d`, CSR number ≥ 5, the zero word (`tval` = instruction word) |
+| 1 | illegal-instruction | undefined opcode/func, `vmul.d`, CSR number ≥ 6, the zero word (`tval` = instruction word) |
 | 2 | capability-tag | `csetbnd(i)`, `cjalr`, `csetepcc`, `cseal`, `cunseal` on an untagged register |
 | 3 | capability-bounds | out-of-bounds access through a capability; non-monotonic `csetbnd(i)` |
 | 4 | capability-permission | load/store through a capability lacking LOAD/STORE; `csc` of a tagged value through a capability lacking STORE_CAP |
@@ -373,10 +375,33 @@ Capability faults on instruction fetch (PCC lacks EXEC / pc outside PCC) use cau
 `cjalr` raises 2 / 4 for an untagged / non-executable target.
 
 Traps are **precise**: the trapping instruction has no architectural effect, everything older has completed.
-On a trap: `epc ← pc`, `cause`, `tval` are written, EPCC ← PCC and PCC ← root; if `tvec ≠ 0` then `pc ← tvec & ~3`, otherwise the machine
-halts reporting the cause. A handler resumes with `eret` (adding 4 to `epc` first to skip the instruction).
+On a trap: `epc ← pc`, `cause`, `tval` are written, EPCC ← PCC and PCC ← root, `status.PIE ← status.IE` and
+`status.IE ← 0`; if `tvec ≠ 0` then `pc ← tvec & ~3`, otherwise the machine halts reporting the cause.
+A handler resumes with `eret` (adding 4 to `epc` first to skip the instruction).
 
-## 7. Memory map (v1 implementation)
+### 6.1 Machine timer interrupt
+
+The timer is **deterministic**: `mtime` (MMIO + 0x30, read-only) is the number of instructions retired since
+reset — every instruction that completes without trapping counts once (traps and interrupts do not retire).
+`mtimecmp` (MMIO + 0x40, read/write) resets to all ones.
+
+* **Pending** ⇔ `status.IE ∧ status.TIE ∧ mtime ≥ mtimecmp` (unsigned 128-bit compare).
+* **Delivery point:** the condition is evaluated *before each instruction* (before its fetch), using the state
+  left by all older instructions. If pending, the interrupt is taken instead of that instruction:
+  `epc ←` its pc, `cause ← 2^127 | 1` (bit 127 = interrupt, code 1 = timer), `tval ← 0`, then the common trap
+  entry above (EPCC, PCC ← root, PIE ← IE, IE ← 0, `pc ← tvec`, or halt when `tvec = 0`).
+  An interrupt therefore lands between two retirements at a point both the ISA model and any implementation
+  agree on — e.g. right after the `csrw status` that enables it, or right after the store that lowers
+  `mtimecmp`. Interrupts have priority over every synchronous trap of the same instruction (including fetch faults).
+* The handler returns with `eret` **without** adding 4 (`epc` is the instruction that has not run yet), and
+  re-arms by writing `mtimecmp` (typically `mtime + period`), or clears TIE/IE.
+* `mtime` / `mtimecmp` are 16-byte registers: a load of any size at `base + k` returns bytes `k…` of the
+  register (natural alignment rules apply); `clc` returns the value untagged. A store (any size) to exactly
+  MMIO + 0x40 sets `mtimecmp` to the stored data zero-extended from its size; other stores to these two
+  registers are ignored.
+* Commit traces record an interrupt as `I 1 <epc>` (synchronous traps: `T cause epc tval`).
+
+## 7. Memory map (reference implementation)
 
 | Address | Size | Region |
 |---|---|---|
@@ -385,8 +410,10 @@ halts reporting the cause. A handler resumes with `eret` (adding 4 to `epc` firs
 | `MMIO + 0x00` | | CONSOLE: write → low byte to console |
 | `MMIO + 0x10` | | EXIT: write → halt, exit code = value[31:0] |
 | `MMIO + 0x20` | | HEXOUT: write → value as 32 hex digits + newline |
+| `MMIO + 0x30` | | MTIME: read → instructions retired so far (§6.1); writes ignored |
+| `MMIO + 0x40` | | MTIMECMP: read/write timer compare, reset all ones (§6.1) |
 
-Other MMIO offsets ignore writes; MMIO reads return 0. Self-modifying code is not supported in v1 (no fence).
+Other MMIO offsets ignore writes and read 0. Self-modifying code is not supported (no fence).
 
 ## 8. Assembler syntax
 
@@ -404,7 +431,8 @@ label:  op operands      # comment   (';' also starts a comment)
 * Sealing is minimal: no sealed entry points ("sentries"/`CInvoke`), no global/local or LOAD_MUTABLE permissions.
 * Single privilege level; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
-* No interrupts, no FPU, no atomics, no fence for self-modifying code.
+* One interrupt source (the deterministic machine timer); no external/software interrupts, no wall-clock time base.
+* No FPU, no atomics, no fence for self-modifying code.
 
 ## 10. Reference implementation notes (non-architectural)
 

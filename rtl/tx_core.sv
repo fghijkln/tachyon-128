@@ -36,6 +36,7 @@ module tx_core #(
   output logic      [127:0] tr_val,
   output logic      [MW-1:0] tr_meta,
   output logic              tr_trap,
+  output logic              tr_irq,
   output logic      [3:0]   tr_cause,
   output logic      [127:0] tr_tval
 );
@@ -108,7 +109,7 @@ module tx_core #(
   logic [2:0]   exmem_csr;
   logic [31:0]  exmem_code;
   // MEM/WB
-  logic         memwb_valid, memwb_we, memwb_trap, memwb_halt;
+  logic         memwb_valid, memwb_we, memwb_trap, memwb_halt, memwb_irq;
   logic [127:0] memwb_pc, memwb_val, memwb_tval;
   logic [MW-1:0] memwb_meta;
   logic [5:0]   memwb_rd;
@@ -116,6 +117,9 @@ module tx_core #(
   logic [31:0]  memwb_code;
   // CSRs
   logic [127:0] csr_tvec, csr_epc, csr_cause, csr_tval, csr_scratch;
+  logic [2:0]   csr_status;            // {TIE, PIE, IE}
+  // deterministic timer: mtime = instructions retired (counted as they pass MEM)
+  logic [127:0] mtime_q, mtimecmp_q;
 
   // ======================================================================== register file
   // value + metadata arrays (no reset: map to RAM macros) + per-register "written" bits.
@@ -387,7 +391,11 @@ module tx_core #(
   end
 
   // ======================================================================== MEM
-  wire        mem_v     = exmem_valid;
+  // timer interrupt: taken on the oldest instruction (the one in MEM) before it has any effect,
+  // so it lands between two retirements exactly where the ISA model puts it
+  wire        irq_pend  = csr_status[0] & csr_status[2] & (mtime_q >= mtimecmp_q);
+  wire        mem_irq   = exmem_valid & irq_pend;
+  wire        mem_v     = exmem_valid & ~irq_pend;      // instruction in MEM really executes
   wire [6:0]  mshift    = {exmem_ea[3:0], 3'd0};
   logic [15:0] be_raw;
   always_comb
@@ -405,7 +413,19 @@ module tx_core #(
   assign dmem_wdata = exmem_sdata << mshift;
   assign dmem_wmeta = exmem_csc ? exmem_smeta : '0;
 
-  wire [127:0] ld_raw = exmem_mmio ? '0 : (dmem_rdata >> mshift);
+  wire [127:0] mmio_word = (exmem_ea[127:4] == MMIO_MTIME[127:4]) ? mtime_q :
+                           (exmem_ea[127:4] == MMIO_MTIMECMP[127:4]) ? mtimecmp_q : '0;
+  wire [127:0] ld_raw = (exmem_mmio ? mmio_word : dmem_rdata) >> mshift;
+  logic [127:0] st_mask;
+  always_comb
+    case (exmem_op)
+      OP_SB:   st_mask = {120'd0, 8'hFF};
+      OP_SH:   st_mask = {112'd0, 16'hFFFF};
+      OP_SW:   st_mask = {96'd0, 32'hFFFF_FFFF};
+      OP_SD:   st_mask = {64'd0, {64{1'b1}}};
+      default: st_mask = {128{1'b1}};
+    endcase
+  wire mem_wr_cmp = mem_v & ~exmem_trap & exmem_store & (exmem_ea == MMIO_MTIMECMP);
   logic [127:0] ld_val;
   always_comb
     case (exmem_op)
@@ -427,10 +447,11 @@ module tx_core #(
       3'd1: csr_rd = csr_epc;
       3'd2: csr_rd = csr_cause;
       3'd3: csr_rd = csr_tval;
-      default: csr_rd = csr_scratch;
+      3'd4: csr_rd = csr_scratch;
+      default: csr_rd = {125'd0, csr_status};
     endcase
 
-  wire mem_trap      = mem_v & exmem_trap;
+  wire mem_trap      = (mem_v & exmem_trap) | mem_irq;
   wire mem_trap_halt = mem_trap & (csr_tvec == '0);
   wire mem_halt      = mem_v & ~exmem_trap & exmem_halt;
   wire mem_eret      = mem_v & ~exmem_trap & exmem_eret;
@@ -448,6 +469,7 @@ module tx_core #(
       fpcc_q <= ROOT_META; pcc_q <= ROOT_META; epcc_q <= ROOT_META;
       ifid_valid <= 1'b0; idex_valid <= 1'b0; exmem_valid <= 1'b0; memwb_valid <= 1'b0;
       csr_tvec <= '0; csr_epc <= '0; csr_cause <= '0; csr_tval <= '0; csr_scratch <= '0;
+      csr_status <= '0; mtime_q <= '0; mtimecmp_q <= {128{1'b1}};
     end else if (!halted_q) begin
       // ---------------- PC
       if (mem_redirect)      pc_q <= mem_target;
@@ -525,29 +547,39 @@ module tx_core #(
       end
 
       // ---------------- MEM: CSRs, traps
+      if (mem_v && !exmem_trap) mtime_q <= mtime_q + 128'd1;     // retirement
+      if (mem_wr_cmp) mtimecmp_q <= exmem_sdata & st_mask;
       if (mem_trap) begin
-        csr_epc <= exmem_pc; csr_cause <= {124'd0, exmem_cause}; csr_tval <= exmem_tval;
+        csr_epc <= exmem_pc;
+        csr_cause <= mem_irq ? {1'b1, 123'd0, IRQ_TIMER} : {124'd0, exmem_cause};
+        csr_tval <= mem_irq ? '0 : exmem_tval;
+        csr_status <= {csr_status[2], csr_status[0], 1'b0};       // PIE <- IE, IE <- 0
+      end else if (mem_eret) begin
+        csr_status <= {csr_status[2], 1'b1, csr_status[1]};       // IE <- PIE, PIE <- 1
       end else if (mem_v && exmem_csrw) begin
         case (exmem_csr)
           3'd0: csr_tvec <= exmem_val;
           3'd1: csr_epc <= exmem_val;
           3'd2: csr_cause <= exmem_val;
+          3'd5: csr_status <= exmem_val[2:0];
           3'd3: csr_tval <= exmem_val;
-          default: csr_scratch <= exmem_val;
+          3'd4: csr_scratch <= exmem_val;
+          default: ;
         endcase
       end
 
       // ---------------- MEM/WB
-      memwb_valid <= mem_v;
+      memwb_valid <= exmem_valid;
+      memwb_irq   <= mem_irq;
       memwb_pc    <= exmem_pc;
       memwb_rd    <= exmem_rd;
-      memwb_we    <= exmem_we & ~exmem_trap;
+      memwb_we    <= exmem_we & ~exmem_trap & ~mem_irq;
       memwb_val   <= exmem_load ? ld_val : (exmem_csrr ? csr_rd : exmem_val);
       memwb_meta  <= exmem_load ? ((exmem_clc & ~exmem_mmio & exmem_ldcap & dmem_rmeta[M_TAG]) ? dmem_rmeta : '0)
                                 : (exmem_csrr ? '0 : exmem_meta);
-      memwb_trap  <= exmem_trap;
-      memwb_cause <= exmem_cause;
-      memwb_tval  <= exmem_tval;
+      memwb_trap  <= exmem_trap | mem_irq;
+      memwb_cause <= mem_irq ? IRQ_TIMER : exmem_cause;
+      memwb_tval  <= mem_irq ? '0 : exmem_tval;
       memwb_halt  <= mem_halt | mem_trap_halt;
       memwb_code  <= exmem_code;
 
@@ -569,6 +601,7 @@ module tx_core #(
   assign tr_val   = memwb_val;
   assign tr_meta  = memwb_meta;
   assign tr_trap  = memwb_trap;
+  assign tr_irq   = memwb_irq;
   assign tr_cause = memwb_cause;
   assign tr_tval  = memwb_tval;
 endmodule

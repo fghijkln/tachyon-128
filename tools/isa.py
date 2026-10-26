@@ -15,6 +15,8 @@ MMIO_BASE = (1 << 128) - 0x10000             # top 64 KiB of the 128-bit space
 MMIO_CONSOLE = MMIO_BASE + 0x00              # write: low byte -> console
 MMIO_EXIT = MMIO_BASE + 0x10                 # write: halt, exit code = value
 MMIO_HEXOUT = MMIO_BASE + 0x20               # write: print value as 32 hex digits + '\n'
+MMIO_MTIME = MMIO_BASE + 0x30                # read: instructions retired so far (deterministic timer)
+MMIO_MTIMECMP = MMIO_BASE + 0x40             # read/write: timer compare (reset all ones)
 
 # ---------------------------------------------------------------- opcodes (bits [5:0])
 OP_ALU = 0x01      # R-type, func = ALU op
@@ -69,8 +71,13 @@ CAP_STORE_OPS = {"csc": OP_CSC}
 BRANCH_OPS = {"beq": OP_BEQ, "bne": OP_BNE, "blt": OP_BLT, "bge": OP_BGE, "bltu": OP_BLTU, "bgeu": OP_BGEU}
 
 # ---------------------------------------------------------------- CSRs
-CSR_NAMES = {"tvec": 0, "epc": 1, "cause": 2, "tval": 3, "scratch": 4}
-NUM_CSRS = 5
+CSR_NAMES = {"tvec": 0, "epc": 1, "cause": 2, "tval": 3, "scratch": 4, "status": 5}
+NUM_CSRS = 6
+CSR_STATUS = 5
+ST_IE, ST_PIE, ST_TIE = 1, 2, 4          # status bits: global enable, previous enable, timer enable
+STATUS_MASK = 7
+IRQ_FLAG = 1 << 127                      # cause bit 127 = interrupt
+IRQ_TIMER = 1                            # interrupt code
 
 # ---------------------------------------------------------------- traps
 CAUSE_ILLEGAL = 1

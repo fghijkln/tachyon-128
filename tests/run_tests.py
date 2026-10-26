@@ -17,7 +17,7 @@ from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import ROOT, assemble_path, assemble_src, run_diff  # noqa: E402
 
-PROGRAMS = ["fib", "fact", "sort", "simd", "capfault", "caplist"]
+PROGRAMS = ["fib", "fact", "sort", "simd", "capfault", "caplist", "timer"]
 WORK = os.environ.get("TX_WORK", os.path.join(ROOT, "build", "work"))
 
 
@@ -73,6 +73,11 @@ def expect_program(name):
                     or [l for l in out.splitlines() if "trap cause" in l] != \
                     ["  !! trap cause=2", "  !! trap cause=3", "  !! trap cause=4"]:
                 return "caplist behaviour wrong"
+        if name == "timer":
+            ticks = sum(1 for l in m.trace if l.startswith("I 1 "))
+            if f"sum(i^2, 1..1000) = {sum(i * i for i in range(1, 1001))}\n" not in out \
+                    or f"timer ticks       = {ticks}\n" not in out or ticks < 10 or out.splitlines()[0] != "." * ticks:
+                return "timer behaviour wrong"
         return None
     return chk
 

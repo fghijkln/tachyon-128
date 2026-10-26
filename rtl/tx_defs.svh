@@ -15,7 +15,7 @@ localparam logic [7:0] N_ALU = 8'd19, N_MULDIV = 8'd6, N_CAP = 8'd15;
 localparam logic [3:0] CF_CGETPCC = 4'd9, CF_CSETEPCC = 4'd10, CF_CJALR = 4'd11,
                        CF_CSEAL = 4'd12, CF_CUNSEAL = 4'd13, CF_CGETTYPE = 4'd14;
 localparam logic [5:0] N_SIMD = 6'd19;
-localparam logic [13:0] N_CSR = 14'd5;
+localparam logic [13:0] N_CSR = 14'd6;
 localparam logic [4:0] SIMD_VMUL = 5'd13;
 
 // ALU function codes
@@ -29,6 +29,9 @@ localparam logic [3:0] C_ILLEGAL = 1, C_CAP_TAG = 2, C_CAP_BOUNDS = 3, C_CAP_PER
 
 // MMIO
 localparam logic [127:0] MMIO_EXIT = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0010};
+localparam logic [127:0] MMIO_MTIME = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0030};
+localparam logic [127:0] MMIO_MTIMECMP = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0040};
+localparam logic [3:0] IRQ_TIMER = 4'd1;
 
 // metadata packing: {tag, otype[15:0], perm[PW-1:0], base[127:0], top[128:0]}
 //   perm bits: 0 LOAD, 1 STORE, 2 EXEC, 3 LOAD_CAP, 4 STORE_CAP, 5 SEAL, 6 UNSEAL; otype 0 = unsealed

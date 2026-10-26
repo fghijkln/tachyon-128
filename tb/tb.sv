@@ -35,7 +35,7 @@ module tb (
   logic [31:0] imem_rdata, exit_code;
   logic dmem_re, dmem_we, halted;
   logic [15:0] dmem_be;
-  logic tr_valid, tr_we, tr_trap;
+  logic tr_valid, tr_we, tr_trap, tr_irq;
   logic [127:0] tr_pc, tr_val, tr_tval;
   logic [5:0] tr_rd;
   logic [MW-1:0] tr_meta;
@@ -67,7 +67,8 @@ module tb (
           $fwrite(fcon, "%032h\n", dmem_wdata & bemask);
       end
       if (tr_valid) begin
-        if (tr_trap) $fwrite(ftr, "T %0d %0h %0h\n", tr_cause, tr_pc, tr_tval);
+        if (tr_irq) $fwrite(ftr, "I %0d %0h\n", tr_cause, tr_pc);
+        else if (tr_trap) $fwrite(ftr, "T %0d %0h %0h\n", tr_cause, tr_pc, tr_tval);
         else begin
           retired <= retired + 1;
           if (tr_we) begin

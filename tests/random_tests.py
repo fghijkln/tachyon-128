@@ -1,7 +1,8 @@
 """Random instruction-stream generator for golden-vs-RTL differential testing.
 
 Each program: random register init (128-bit values via li/wide immediates), a trap handler
-that skips faulting instructions, then a weighted random mix of every instruction class:
+that skips faulting instructions and services deterministic timer interrupts (re-arming mtimecmp
+= mtime + delta; mtime counts retired instructions, so golden and RTL agree on every delivery point), then a weighted random mix of every instruction class:
 ALU (R/I), SIMD (all lanes), MUL/DIV, capability ops, wide immediates, loads/stores of all
 sizes (through an untagged base, a bounded capability, and random bases -> faults), capability
 sealing/unsealing (cseal/cunseal with a sealing authority, sealed-use faults), spills/reloads (clc/csc, incl. tag clearing by data stores and LOAD_CAP/STORE_CAP checks), forward
@@ -28,6 +29,7 @@ class Gen:
         self.recent = []
         self.lbl = 0
         self.cslots = []
+        self.irqs = False
 
     def val(self):
         r = self.r
@@ -202,7 +204,12 @@ class Gen:
         elif k == "csr":
             if r.random() < 0.5:
                 self.emit(f"csrw scratch, r{self.src()}")
-            self.emit(f"csrr r{self.dst()}, {r.choice(['scratch', 'cause', 'tval', 'epc', 'tvec'])}")
+            self.emit(f"csrr r{self.dst()}, {r.choice(['scratch', 'cause', 'tval', 'epc', 'tvec', 'status'])}")
+            if self.irqs and r.random() < 0.2:      # toggle interrupt enables
+                self.emit(f"li r51, {r.choice([0, 1, 4, 5, 5, 7])}")
+                self.emit("csrw status, r51")
+            if r.random() < 0.3:                    # read the timer registers
+                self.emit(f"{r.choice(['lq', 'ld', 'lw', 'lbu'])} r{self.dst()}, {r.choice([0x30, 0x40])}(r52)")
         elif k == "ill":
             self.emit(f".word 0x{r.choice([0, 0xff000001, 0x37000003, 0x00000007, 0x0080003d]):08x}")
 
@@ -228,14 +235,24 @@ def gen_program(seed, n=None):
     g.emit("candperm r55, rc, r54")
     g.emit(f"li r54, {r.choice([0, 1, 1, 2, 3, 3, 0x10000])}")
     g.emit("csetaddr r55, r55, r54")
+    g.emit("li r52, -0x10000")              # MMIO base (timer registers at +0x30 / +0x40)
     for reg in POOL:
         if r.random() < 0.8:
             g.emit(f"li r{reg}, {g.val()}")
+    irqs = r.random() < 0.6
+    delta = r.randint(8, 80)              # > handler length, so the mainline always progresses
+    if irqs:                                # deterministic timer interrupts (mtime = retired count)
+        g.irqs = True
+        g.emit(f"li r51, {r.randint(5, 200)}")
+        g.emit("sq r51, 0x40(r52)")
+        g.emit(f"li r51, {r.choice([5, 5, 5, 7, 1])}")
+        g.emit("csrw status, r51")
     for _ in range(n):
         g.one()
     g.emit("halt zero")
     g.out.append("handler:")
     g.emit("csrr r62, cause")
+    g.emit("bltz r62, Hirq")
     g.emit("csrr r59, epc")
     g.emit("csrr r58, tval")
     g.emit("bne r58, r59, Hskip")
@@ -243,6 +260,12 @@ def gen_program(seed, n=None):
     g.out.append("Hskip:")
     g.emit("addi r59, r59, 4")
     g.emit("csrw epc, r59")
+    g.emit("eret")
+    g.out.append("Hirq:")                   # timer interrupt: re-arm mtimecmp = mtime + delta, resume at epc
+    g.emit("addi r50, r50, 1")
+    g.emit("lq r51, 0x30(r52)")
+    g.emit(f"addi r51, r51, {delta}")
+    g.emit("sq r51, 0x40(r52)")
     g.emit("eret")
     g.out.append("        .align 16")
     g.out.append("data:")
