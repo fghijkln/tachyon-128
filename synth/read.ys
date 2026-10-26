@@ -1,0 +1,2 @@
+read_verilog -sv -I rtl rtl/tx_alu.sv rtl/tx_simd.sv rtl/tx_muldiv.sv rtl/tx_core.sv
+hierarchy -check -top tx_core

@@ -1,0 +1,190 @@
+"""Random instruction-stream generator for golden-vs-RTL differential testing.
+
+Each program: random register init (128-bit values via li/wide immediates), a trap handler
+that skips faulting instructions, then a weighted random mix of every instruction class:
+ALU (R/I), SIMD (all lanes), MUL/DIV, capability ops, wide immediates, loads/stores of all
+sizes (through an untagged base, a bounded capability, and random bases -> faults), forward
+branches, counted backward loops, JAL, CSR traffic and illegal words.  Sources are biased
+toward recently written registers to stress forwarding and interlocks.
+"""
+import os
+import random
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+from isa import (ALU_FUNCS, ALU_UNARY, MULDIV_FUNCS, SIMD_FUNCS, SIMD_UNARY, LANE_SUFFIX,  # noqa: E402
+                 CAP_FUNCS, CAP_UNARY, LOAD_OPS, STORE_OPS, BRANCH_OPS)
+
+POOL = list(range(4, 41))
+M = (1 << 128) - 1
+
+
+class Gen:
+    def __init__(self, seed):
+        self.r = random.Random(seed)
+        self.out = []
+        self.recent = []
+        self.lbl = 0
+
+    def val(self):
+        r = self.r
+        c = r.random()
+        if c < 0.3:
+            return r.getrandbits(128)
+        if c < 0.5:
+            return r.getrandbits(r.randint(1, 128))
+        if c < 0.7:
+            return r.choice([0, 1, 2, 3, M, M - 1, 1 << 127, (1 << 127) - 1, 0x80, 0xFF, 1 << 64, 16, 7])
+        return r.randint(-5000, 5000) & M
+
+    def src(self):
+        r = self.r
+        if self.recent and r.random() < 0.55:
+            return r.choice(self.recent[-3:])
+        return r.choice(POOL + [0])
+
+    def dst(self):
+        d = self.r.choice(POOL) if self.r.random() > 0.03 else 0
+        self.recent.append(d)
+        return d
+
+    def label(self):
+        self.lbl += 1
+        return f"L{self.lbl}"
+
+    def emit(self, s):
+        self.out.append("        " + s)
+
+    def one(self, allow_ctrl=True):
+        r = self.r
+        k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
+                       "ldrand", "br", "loop", "jal", "csr", "ill"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1])[0]
+        if not allow_ctrl and k in ("br", "loop", "jal"):
+            k = "alu"
+        if k == "alu":
+            f = r.choice(ALU_FUNCS)
+            if f in ALU_UNARY:
+                self.emit(f"{f} r{self.dst()}, r{self.src()}")
+            else:
+                self.emit(f"{f} r{self.dst()}, r{self.src()}, r{self.src()}")
+        elif k == "alui":
+            f = r.choice(["addi", "andi", "ori", "xori", "slti", "sltiu", "slli", "srli", "srai"])
+            imm = r.randint(0, 127) if f in ("slli", "srli", "srai") else r.randint(-8192, 8191)
+            self.emit(f"{f} r{self.dst()}, r{self.src()}, {imm}")
+        elif k == "simd":
+            f = r.choice(SIMD_FUNCS)
+            suf = r.choice("bhwd" if f != "vmul" else "bhw")
+            if f in SIMD_UNARY:
+                self.emit(f"{f}.{suf} r{self.dst()}, r{self.src()}")
+            else:
+                self.emit(f"{f}.{suf} r{self.dst()}, r{self.src()}, r{self.src()}")
+        elif k == "md":
+            f = r.choice(MULDIV_FUNCS)
+            a, b = self.src(), self.src()
+            d = self.dst()
+            self.emit(f"{f} r{d}, r{a}, r{b}")
+            if r.random() < 0.4:       # partner op on same operands (result cache)
+                partner = {"mul": "mulhu", "mulhu": "mul", "div": "rem", "rem": "div",
+                           "divu": "remu", "remu": "divu"}[f]
+                if d not in (a, b):
+                    self.emit(f"{partner} r{self.dst()}, r{a}, r{b}")
+        elif k == "cap":
+            f = r.choice(CAP_FUNCS + ["cincaddri", "csetbndi"])
+            s1 = r.choice([60, 63, self.src(), self.src()])
+            if f in CAP_UNARY:
+                self.emit(f"{f} r{self.dst()}, r{s1}")
+            elif f == "cincaddri":
+                self.emit(f"cincaddri r{self.dst()}, r{s1}, {r.randint(-64, 64)}")
+            elif f == "csetbndi":
+                self.emit(f"csetbndi r{self.dst()}, r{s1}, {r.randint(0, 300)}")
+            else:
+                self.emit(f"{f} r{self.dst()}, r{s1}, r{self.src()}")
+        elif k == "wide":
+            self.emit(f"{r.choice(['wli', 'wins'])} r{self.dst()}, {r.getrandbits(16)}, {r.randint(0, 7)}")
+        elif k in ("ld", "ldcap"):
+            f = r.choice(list(LOAD_OPS))
+            size = LOAD_OPS[f][1]
+            off = r.randrange(0, 1024, size) if r.random() < 0.9 else r.randrange(0, 1024)
+            base = 3 if k == "ld" else 60
+            if k == "ldcap" and r.random() < 0.15:
+                off = r.choice([1024, 1024 - size + 1, -size]) if r.random() < 0.7 else off
+            self.emit(f"{f} r{self.dst()}, {off}(r{base})")
+        elif k in ("st", "stcap"):
+            f = r.choice(list(STORE_OPS))
+            size = STORE_OPS[f][1]
+            off = r.randrange(0, 1024, size) if r.random() < 0.9 else r.randrange(0, 1024)
+            base = 3 if k == "st" else 60
+            if k == "stcap" and r.random() < 0.15:
+                off = r.choice([1024, -size, 2000])
+            self.emit(f"{f} r{self.src()}, {off}(r{base})")
+        elif k == "ldrand":         # random base: mostly access/align/cap faults, never a store
+            f = r.choice(list(LOAD_OPS))
+            self.emit(f"{f} r{self.dst()}, {r.randint(-64, 64)}(r{self.src()})")
+        elif k == "br":
+            f = r.choice(list(BRANCH_OPS) + ["beqz", "bnez"])
+            L = self.label()
+            if f in ("beqz", "bnez"):
+                self.emit(f"{f} r{self.src()}, {L}")
+            else:
+                self.emit(f"{f} r{self.src()}, r{self.src()}, {L}")
+            for _ in range(r.randint(0, 4)):
+                self.one(allow_ctrl=False)
+            self.out.append(f"{L}:")
+        elif k == "loop":
+            L = self.label()
+            self.emit(f"li r61, {r.randint(1, 6)}")
+            self.out.append(f"{L}:")
+            for _ in range(r.randint(1, 6)):
+                self.one(allow_ctrl=False)
+            self.emit("addi r61, r61, -1")
+            self.emit(f"bnez r61, {L}")
+        elif k == "jal":
+            L = self.label()
+            self.emit(f"jal r{self.dst()}, {L}")
+            for _ in range(r.randint(0, 3)):
+                self.one(allow_ctrl=False)
+            self.out.append(f"{L}:")
+        elif k == "csr":
+            if r.random() < 0.5:
+                self.emit(f"csrw scratch, r{self.src()}")
+            self.emit(f"csrr r{self.dst()}, {r.choice(['scratch', 'cause', 'tval', 'epc', 'tvec'])}")
+        elif k == "ill":
+            self.emit(f".word 0x{r.choice([0, 0xff000001, 0x37000003, 0x00000007, 0x0080003d]):08x}")
+
+
+def gen_program(seed, n=None):
+    g = Gen(seed)
+    r = g.r
+    n = n or r.randint(120, 320)
+    g.out.append("        .org 0")
+    g.emit("la r4, handler")
+    g.emit("csrw tvec, r4")
+    g.emit("la r3, data")
+    g.emit("li r5, 1024")
+    g.emit("csetaddr r60, rc, r3")
+    g.emit("csetbnd r60, r60, r5")
+    if r.random() < 0.5:
+        g.emit("li r6, 3")              # sometimes a read-only data capability
+        g.emit(f"candperm r60, r60, r{r.choice([6, 5])}")
+    for reg in POOL:
+        if r.random() < 0.8:
+            g.emit(f"li r{reg}, {g.val()}")
+    for _ in range(n):
+        g.one()
+    g.emit("halt zero")
+    g.out.append("handler:")
+    g.emit("csrr r62, cause")
+    g.emit("csrr r59, epc")
+    g.emit("addi r59, r59, 4")
+    g.emit("csrw epc, r59")
+    g.emit("eret")
+    g.out.append("        .align 16")
+    g.out.append("data:")
+    for _ in range(64):
+        g.out.append(f"        .quad {r.getrandbits(128)}")
+    return "\n".join(g.out) + "\n"
+
+
+if __name__ == "__main__":
+    print(gen_program(int(sys.argv[1]) if len(sys.argv) > 1 else 1))

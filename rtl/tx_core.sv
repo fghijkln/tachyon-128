@@ -50,7 +50,7 @@ module tx_core #(
     case (op)
       OP_ALU:    if (fn < N_ALU) k[K_ALUR] = 1; else k[K_ILL] = 1;
       OP_MULDIV: if (fn < N_MULDIV) k[K_MD] = 1; else k[K_ILL] = 1;
-      OP_SIMD:   if (fn[7:2] < N_SIMD && !(fn[7:2] == 6'(SIMD_VMUL) && fn[1:0] == 2'd3)) k[K_SIMD] = 1;
+      OP_SIMD:   if (fn[7:2] < N_SIMD && !(fn[7:2] == {1'b0, SIMD_VMUL} && fn[1:0] == 2'd3)) k[K_SIMD] = 1;
                  else k[K_ILL] = 1;
       OP_CAP:    if (fn < N_CAP) k[K_CAPR] = 1; else k[K_ILL] = 1;
       OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI: k[K_ALUI] = 1;
@@ -67,11 +67,11 @@ module tx_core #(
       OP_ERET:   k[K_ERET] = 1;
       default:   k[K_ILL] = 1;
     endcase
-    return k;
+    decode = k;
   endfunction
 
   function automatic logic writes_rd(input logic [NK-1:0] k);
-    return k[K_ALUR] | k[K_MD] | k[K_SIMD] | k[K_CAPR] | k[K_ALUI] | k[K_CAPI] | k[K_WIDE] |
+    writes_rd = k[K_ALUR] | k[K_MD] | k[K_SIMD] | k[K_CAPR] | k[K_ALUI] | k[K_CAPI] | k[K_WIDE] |
            k[K_LOAD] | k[K_JAL] | k[K_JALR] | k[K_CSRR];
   endfunction
 

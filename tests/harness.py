@@ -10,7 +10,7 @@ from asm import Assembler, preprocess, write_hex128  # noqa: E402
 from isa import RAM_BYTES  # noqa: E402
 from sim import Machine  # noqa: E402
 
-VTB = os.path.join(ROOT, "build", "vtb", "Vtb")
+VTB = os.environ.get("TX_VTB", os.path.join(ROOT, "build", "vtb", "Vtb"))
 
 
 def assemble_src(src):
@@ -49,7 +49,7 @@ def run_diff(name, binary, workdir, max_steps=3_000_000, expect=None):
             res.msg = "golden expectation failed: " + err
             return res
     files = {k: f"{base}.rtl.{k}" for k in ("trace", "console", "mem", "stat")}
-    cmd = [VTB, f"+prog={hexf}", f"+max={max_steps * 200 + 10000}"] + [f"+{k}={v}" for k, v in files.items()]
+    cmd = [VTB, f"+prog={hexf}", f"+max={m.retired * 40 + 10000}"] + [f"+{k}={v}" for k, v in files.items()]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
         res.msg = f"RTL run failed rc={p.returncode}: {p.stderr.strip()[-300:]}"

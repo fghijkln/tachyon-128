@@ -1,0 +1,23 @@
+# TACHYON-128 generic-gate synthesis (Yosys).  The two register-file arrays are kept as
+# memory macros ($mem_v2, 64 words x 128b and 64 x 261b, 2R1W async-read) - as a real
+# implementation would use a register-file compiler - everything else is mapped to gates.
+script synth/read.ys
+proc
+flatten
+opt_expr
+opt_clean
+opt -nodffe -nosdff
+memory -nomap
+opt -full
+wreduce
+peepopt
+alumacc
+share
+opt
+memory -nomap
+opt -fast
+techmap
+opt -fast
+abc
+opt_clean
+tee -o build/synth_stat.txt stat -top tx_core
