@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""TACHYON-128 reference ISA simulator (golden model).
+
+Usage: sim.py prog.bin [--trace out.trace] [--max N] [--quiet] [--regs]
+
+Architectural state: 64 x (128-bit value + capability tag + perms/base/top), 128-bit PC,
+CSRs tvec/epc/cause/tval/scratch, RAM_BYTES of RAM at 0, MMIO page at the top of the space.
+Writes a commit trace (one line per retired instruction, one 'T' line per trap) that the RTL
+testbench reproduces bit-for-bit.
+"""
+import os
+import struct
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from isa import *  # noqa: E402,F401,F403
+
+
+class Trap(Exception):
+    def __init__(self, cause, tval):
+        self.cause, self.tval = cause, tval & MASK
+
+
+class Halt(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def clz(v):
+    return XLEN - v.bit_length()
+
+
+def ctz(v):
+    return XLEN if v == 0 else (v & -v).bit_length() - 1
+
+
+def lanes(v, w):
+    return [(v >> (i * w)) & ((1 << w) - 1) for i in range(XLEN // w)]
+
+
+def pack(ls, w):
+    m = (1 << w) - 1
+    r = 0
+    for i, x in enumerate(ls):
+        r |= (x & m) << (i * w)
+    return r
+
+
+def simd(op, w, a, b):
+    la, lb = lanes(a, w), lanes(b, w)
+    m = (1 << w) - 1
+    smin, smax = -(1 << (w - 1)), (1 << (w - 1)) - 1
+    S = lambda x: sext(x, w)  # noqa: E731
+    clamp = lambda x, lo, hi: max(lo, min(hi, x))  # noqa: E731
+    sh = b & (w - 1)
+    if op == "vsum":
+        return sum(la) & MASK
+    if op == "vsplat":
+        return pack([la[0]] * len(la), w)
+    f = {
+        "vadd": lambda x, y: x + y,
+        "vsub": lambda x, y: x - y,
+        "vaddss": lambda x, y: clamp(S(x) + S(y), smin, smax),
+        "vaddus": lambda x, y: min(x + y, m),
+        "vsubss": lambda x, y: clamp(S(x) - S(y), smin, smax),
+        "vsubus": lambda x, y: max(x - y, 0),
+        "vmins": lambda x, y: min(S(x), S(y)),
+        "vminu": lambda x, y: min(x, y),
+        "vmaxs": lambda x, y: max(S(x), S(y)),
+        "vmaxu": lambda x, y: max(x, y),
+        "vcmpeq": lambda x, y: m if x == y else 0,
+        "vcmpgts": lambda x, y: m if S(x) > S(y) else 0,
+        "vcmpgtu": lambda x, y: m if x > y else 0,
+        "vmul": lambda x, y: x * y,
+        "vsll": lambda x, y: x << sh,
+        "vsrl": lambda x, y: x >> sh,
+        "vsra": lambda x, y: S(x) >> sh,
+    }[op]
+    return pack([f(x, y) for x, y in zip(la, lb)], w)
+
+
+def divs(a, b, signed, want_rem):
+    """RISC-V style division semantics on 128-bit values."""
+    if b == 0:
+        return a if want_rem else MASK
+    if not signed:
+        return a % b if want_rem else a // b
+    sa, sb = to_signed(a), to_signed(b)
+    if sa == -(1 << 127) and sb == -1:
+        return 0 if want_rem else a
+    q = abs(sa) // abs(sb)
+    if (sa < 0) != (sb < 0):
+        q = -q
+    r = sa - q * sb
+    return (r if want_rem else q) & MASK
+
+
+class Machine:
+    def __init__(self, binary, ram_bytes=RAM_BYTES):
+        self.ram = bytearray(ram_bytes)
+        self.ram[:len(binary)] = binary
+        self.val = [0] * NREGS
+        self.tag = [0] * NREGS
+        self.meta = [(0, 0, 0)] * NREGS          # (perm, base, top)
+        # root capability lives in r63 (rc) at reset: all permissions over the whole space
+        self.val[63], self.tag[63], self.meta[63] = 0, 1, (PERM_ALL, 0, TOP_MAX)
+        self.pc = 0
+        self.csr = [0] * NUM_CSRS
+        self.console = bytearray()
+        self.trace = []
+        self.retired = 0
+        self.halted = None          # ('exit', code) | ('trap', cause)
+        self.exit_code = 0
+
+    # ---------------------------------------------------------------- register helpers
+    def rd_write(self, rd, v, tag=0, meta=(0, 0, 0)):
+        if rd == 0:
+            return None
+        self.val[rd] = v & MASK
+        self.tag[rd] = tag
+        self.meta[rd] = meta if tag else (0, 0, 0)
+        return rd
+
+    # ---------------------------------------------------------------- memory
+    def check_access(self, rs1, ea, size, is_store):
+        if self.tag[rs1]:
+            perm, base, top = self.meta[rs1]
+            need = PERM_STORE if is_store else PERM_LOAD
+            if not perm & need:
+                raise Trap(CAUSE_CAP_PERM, ea)
+            if ea < base or ea + size > top:
+                raise Trap(CAUSE_CAP_BOUNDS, ea)
+        if ea % size:
+            raise Trap(CAUSE_ALIGN, ea)
+        if ea + size <= len(self.ram):
+            return "ram"
+        if ea >= MMIO_BASE:
+            return "mmio"
+        raise Trap(CAUSE_ACCESS, ea)
+
+    def load(self, rs1, ea, size, signed):
+        kind = self.check_access(rs1, ea, size, False)
+        if kind == "mmio":
+            return 0
+        v = int.from_bytes(self.ram[ea:ea + size], "little")
+        return sext(v, 8 * size) & MASK if signed else v
+
+    def store(self, rs1, ea, size, v):
+        kind = self.check_access(rs1, ea, size, True)
+        v &= (1 << (8 * size)) - 1
+        if kind == "mmio":
+            if ea == MMIO_CONSOLE:
+                self.console.append(v & 0xFF)
+            elif ea == MMIO_HEXOUT:
+                self.console += f"{v:032x}\n".encode()
+            elif ea == MMIO_EXIT:
+                raise Halt(v & 0xFFFFFFFF)
+            return
+        self.ram[ea:ea + size] = v.to_bytes(size, "little")
+
+    # ---------------------------------------------------------------- one instruction
+    def step(self):
+        pc = self.pc
+        if pc + 4 > len(self.ram):
+            raise Trap(CAUSE_ACCESS, pc)
+        w = struct.unpack_from("<I", self.ram, pc)[0]
+        f = fields(w)
+        op, rd, rs1, rs2, func = f["op"], f["rd"], f["rs1"], f["rs2"], f["func"]
+        A = f["rd"]                       # field A (store data / branch rs2 / wins source)
+        x1, x2 = self.val[rs1], self.val[rs2]
+        npc = (pc + 4) & MASK
+        wrote = None
+        self._halt = None
+
+        if op == OP_ALU:
+            if func >= len(ALU_FUNCS):
+                raise Trap(CAUSE_ILLEGAL, w)
+            fn = ALU_FUNCS[func]
+            s1, s2 = to_signed(x1), to_signed(x2)
+            sh = x2 & 127
+            r = {
+                "add": lambda: x1 + x2, "sub": lambda: x1 - x2, "and": lambda: x1 & x2,
+                "or": lambda: x1 | x2, "xor": lambda: x1 ^ x2, "sll": lambda: x1 << sh,
+                "srl": lambda: x1 >> sh, "sra": lambda: s1 >> sh, "slt": lambda: int(s1 < s2),
+                "sltu": lambda: int(x1 < x2), "min": lambda: min(s1, s2), "max": lambda: max(s1, s2),
+                "minu": lambda: min(x1, x2), "maxu": lambda: max(x1, x2), "andn": lambda: x1 & ~x2,
+                "seq": lambda: int(x1 == x2), "clz": lambda: clz(x1), "ctz": lambda: ctz(x1),
+                "popcnt": lambda: bin(x1).count("1"),
+            }[fn]()
+            wrote = self.rd_write(rd, r)
+        elif op == OP_MULDIV:
+            if func >= len(MULDIV_FUNCS):
+                raise Trap(CAUSE_ILLEGAL, w)
+            fn = MULDIV_FUNCS[func]
+            if fn == "mul":
+                r = x1 * x2
+            elif fn == "mulhu":
+                r = (x1 * x2) >> 128
+            else:
+                r = divs(x1, x2, fn in ("div", "rem"), fn.startswith("rem"))
+            wrote = self.rd_write(rd, r)
+        elif op == OP_SIMD:
+            sop, lw = func >> 2, func & 3
+            if sop >= len(SIMD_FUNCS) or (SIMD_FUNCS[sop] == "vmul" and lw == 3):
+                raise Trap(CAUSE_ILLEGAL, w)
+            wrote = self.rd_write(rd, simd(SIMD_FUNCS[sop], LANE_BITS[lw], x1, x2))
+        elif op == OP_CAP:
+            if func >= len(CAP_FUNCS):
+                raise Trap(CAUSE_ILLEGAL, w)
+            wrote = self.cap_op(CAP_FUNCS[func], rd, rs1, x2)
+        elif op in I_OPS.values():
+            imm = f["imm14"]
+            ui = imm & MASK
+            s1 = to_signed(x1)
+            sh = f["uimm14"] & 127
+            if op == OP_ADDI:
+                wrote = self.rd_write(rd, x1 + imm)
+            elif op == OP_ANDI:
+                wrote = self.rd_write(rd, x1 & ui)
+            elif op == OP_ORI:
+                wrote = self.rd_write(rd, x1 | ui)
+            elif op == OP_XORI:
+                wrote = self.rd_write(rd, x1 ^ ui)
+            elif op == OP_SLTI:
+                wrote = self.rd_write(rd, int(s1 < imm))
+            elif op == OP_SLTIU:
+                wrote = self.rd_write(rd, int(x1 < ui))
+            elif op == OP_SLLI:
+                wrote = self.rd_write(rd, x1 << sh)
+            elif op == OP_SRLI:
+                wrote = self.rd_write(rd, x1 >> sh)
+            elif op == OP_SRAI:
+                wrote = self.rd_write(rd, s1 >> sh)
+            elif op == OP_CINCADDRI:
+                wrote = self.cap_op("cincaddr", rd, rs1, ui)
+            elif op == OP_CSETBNDI:
+                wrote = self.cap_op("csetbnd", rd, rs1, f["uimm14"])
+        elif op == OP_WIDE:
+            sh = 16 * f["slot"]
+            ins = f["imm16"] << sh
+            if f["keep"]:
+                ins |= self.val[rd] & ~(0xFFFF << sh) & MASK
+            wrote = self.rd_write(rd, ins)
+        elif OP_LB <= op <= OP_LDU:
+            _, size, signed = [v for v in LOAD_OPS.values() if v[0] == op][0]
+            ea = (x1 + f["imm14"]) & MASK
+            wrote = self.rd_write(rd, self.load(rs1, ea, size, signed))
+        elif OP_SB <= op <= OP_SQ:
+            size = [v[1] for v in STORE_OPS.values() if v[0] == op][0]
+            ea = (x1 + f["imm14"]) & MASK
+            self.store(rs1, ea, size, self.val[A])
+        elif OP_BEQ <= op <= OP_BGEU:
+            a, b = x1, self.val[A]
+            sa, sb = to_signed(a), to_signed(b)
+            t = {OP_BEQ: a == b, OP_BNE: a != b, OP_BLT: sa < sb, OP_BGE: sa >= sb,
+                 OP_BLTU: a < b, OP_BGEU: a >= b}[op]
+            if t:
+                npc = (pc + 4 * f["imm14"]) & MASK
+        elif op == OP_JAL:
+            wrote = self.rd_write(rd, pc + 4)
+            npc = (pc + 4 * f["imm20"]) & MASK
+        elif op == OP_JALR:
+            npc = (x1 + f["imm14"]) & MASK & ~3
+            wrote = self.rd_write(rd, pc + 4)
+        elif op == OP_HALT:
+            self._halt = x1 & 0xFFFFFFFF
+        elif op == OP_CSRR:
+            if f["uimm14"] >= NUM_CSRS:
+                raise Trap(CAUSE_ILLEGAL, w)
+            wrote = self.rd_write(rd, self.csr[f["uimm14"]])
+        elif op == OP_CSRW:
+            if f["uimm14"] >= NUM_CSRS:
+                raise Trap(CAUSE_ILLEGAL, w)
+            self.csr[f["uimm14"]] = x1
+        elif op == OP_ERET:
+            npc = self.csr[1] & ~3
+        else:
+            raise Trap(CAUSE_ILLEGAL, w)
+        return pc, npc, wrote
+
+    def cap_op(self, fn, rd, rs1, x2):
+        t, (perm, base, top), a = self.tag[rs1], self.meta[rs1], self.val[rs1]
+        if fn == "csetaddr":
+            return self.rd_write(rd, x2, t, (perm, base, top))
+        if fn == "cincaddr":
+            return self.rd_write(rd, a + x2, t, (perm, base, top))
+        if fn == "csetbnd":
+            if not t:
+                raise Trap(CAUSE_CAP_TAG, a)
+            ntop = a + x2
+            if a < base or ntop > top:
+                raise Trap(CAUSE_CAP_BOUNDS, a)
+            return self.rd_write(rd, a, 1, (perm, a, ntop))
+        if fn == "candperm":
+            return self.rd_write(rd, a, t, (perm & x2 & 7, base, top))
+        if fn == "cgetbase":
+            return self.rd_write(rd, base)
+        if fn == "cgetlen":
+            return self.rd_write(rd, min(top - base, MASK))
+        if fn == "cgetperm":
+            return self.rd_write(rd, perm)
+        if fn == "cgettag":
+            return self.rd_write(rd, t)
+        if fn == "cclrtag":
+            return self.rd_write(rd, a)
+        raise AssertionError(fn)
+
+    # ---------------------------------------------------------------- run loop
+    def trace_line(self, pc, rd):
+        if rd is None:
+            return f"{pc:x} 0 0 0"
+        line = f"{pc:x} {rd} {self.val[rd]:x} {self.tag[rd]}"
+        if self.tag[rd]:
+            p, b, t = self.meta[rd]
+            line += f" {p} {b:x} {t:x}"
+        return line
+
+    def run(self, max_steps=5_000_000):
+        while self.halted is None and self.retired < max_steps:
+            try:
+                pc, npc, wrote = self.step()
+            except Trap as tr:
+                self.csr[1], self.csr[2], self.csr[3] = self.pc, tr.cause, tr.tval
+                self.trace.append(f"T {tr.cause} {self.pc:x} {tr.tval:x}")
+                if self.csr[0] == 0:
+                    self.halted = ("trap", tr.cause)
+                else:
+                    self.pc = self.csr[0] & MASK & ~3
+                continue
+            except Halt as h:
+                # MMIO exit store retires, then the machine stops
+                self.trace.append(self.trace_line(self.pc, None))
+                self.retired += 1
+                self.halted, self.exit_code = ("exit", h.code), h.code
+                break
+            self.trace.append(self.trace_line(pc, wrote))
+            self.retired += 1
+            self.pc = npc
+            if self._halt is not None:
+                self.halted, self.exit_code = ("exit", self._halt), self._halt
+        if self.halted is None:
+            self.halted = ("timeout", 0)
+        return self
+
+    def regdump(self):
+        out = []
+        for i in range(NREGS):
+            s = f"r{i:<2} {self.val[i]:032x} tag={self.tag[i]}"
+            if self.tag[i]:
+                p, b, t = self.meta[i]
+                s += f" perm={p} base={b:x} top={t:x}"
+            out.append(s)
+        return "\n".join(out)
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="TACHYON-128 golden ISA simulator")
+    ap.add_argument("bin")
+    ap.add_argument("--trace")
+    ap.add_argument("--max", type=int, default=5_000_000)
+    ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--regs", action="store_true")
+    a = ap.parse_args()
+    m = Machine(open(a.bin, "rb").read()).run(a.max)
+    if a.trace:
+        with open(a.trace, "w") as f:
+            f.write("\n".join(m.trace) + "\n")
+    if not a.quiet:
+        sys.stdout.write(m.console.decode("latin-1"))
+        print(f"--- {m.halted[0]} code={m.halted[1]} retired={m.retired}", file=sys.stderr)
+    if a.regs:
+        print(m.regdump())
+    sys.exit(0 if m.halted[0] == "exit" else 1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,6 @@
+build/
+*.bin
+*.hex
+*.lst
+__pycache__/
+obj_dir/
