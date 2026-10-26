@@ -11,7 +11,9 @@ localparam logic [5:0] OP_BEQ = 6'h30, OP_BNE = 6'h31, OP_BLT = 6'h32, OP_BGE = 
 localparam logic [5:0] OP_JAL = 6'h38, OP_JALR = 6'h39, OP_HALT = 6'h3C, OP_CSRR = 6'h3D,
                        OP_CSRW = 6'h3E, OP_ERET = 6'h3F;
 
-localparam int N_ALU = 19, N_MULDIV = 6, N_SIMD = 19, N_CAP = 9, N_CSR = 5;
+localparam logic [7:0] N_ALU = 8'd19, N_MULDIV = 8'd6, N_CAP = 8'd9;
+localparam logic [5:0] N_SIMD = 6'd19;
+localparam logic [13:0] N_CSR = 14'd5;
 localparam logic [4:0] SIMD_VMUL = 5'd13;
 
 // ALU function codes

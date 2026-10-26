@@ -1,0 +1,23 @@
+# Hierarchical variant: techmap + ABC per module (hierarchy kept), faster than flattened ABC.
+script synth/read.ys
+proc
+
+opt_expr
+abc
+opt_clean
+opt -nodffe -nosdff
+memory -nomap
+opt -full
+wreduce
+peepopt
+alumacc
+share
+opt
+memory -nomap
+opt -fast
+techmap
+opt -fast
+
+abc
+opt_clean
+tee -o build/synth_stat_abc_hier.txt stat -top tx_core

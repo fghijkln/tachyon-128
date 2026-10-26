@@ -24,7 +24,7 @@ def check_defs():
     for name, val in re.findall(r"(OP_\w+)\s*=\s*6'h([0-9A-Fa-f]+)", sv):
         assert getattr(isa, name) == int(val, 16), name
         n += 1
-    counts = dict(re.findall(r"(N_\w+)\s*=\s*(\d+)", sv))
+    counts = dict(re.findall(r"(N_\w+)\s*=\s*\d+'d(\d+)", sv))
     assert int(counts["N_ALU"]) == len(isa.ALU_FUNCS)
     assert int(counts["N_MULDIV"]) == len(isa.MULDIV_FUNCS)
     assert int(counts["N_SIMD"]) == len(isa.SIMD_FUNCS)
