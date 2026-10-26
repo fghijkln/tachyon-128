@@ -203,7 +203,13 @@ module tx_core #(
   end
   wire         a_tag  = ma[M_TAG];
   wire [PW-1:0] a_perm = ma[M_PERM +: PW];
+  wire [15:0]  a_ot   = ma[M_OT +: 16];
+  wire         a_sealed = a_tag & (|a_ot);
   wire         b_tag  = mb[M_TAG];
+  wire [PW-1:0] b_perm = mb[M_PERM +: PW];
+  wire [127:0] b_base = mb[256:129];
+  wire [128:0] b_top  = mb[128:0];
+  wire         b_sealed = b_tag & (|mb[M_OT +: 16]);
   wire [127:0] a_base = ma[256:129];
   wire [128:0] a_top  = ma[128:0];
 
@@ -242,7 +248,7 @@ module tx_core #(
 
   // ---- capabilities
   logic [3:0]   cap_fn;
-  logic [127:0] cap_y, cap_x;
+  logic [127:0] cap_y, cap_x, cap_tv;
   logic [MW-1:0] cap_m;
   logic         cap_fault;
   logic [3:0]   cap_cause;
@@ -251,19 +257,19 @@ module tx_core #(
   always_comb begin
     cap_fn = ex_k[K_CAPR] ? ex_fn[3:0] : (ex_op == OP_CINCADDRI ? 4'd1 : 4'd2);
     cap_x  = ex_k[K_CAPR] ? b : (ex_op == OP_CINCADDRI ? ex_imm : ex_uimm);
-    cap_y = '0; cap_m = '0; cap_fault = 1'b0; cap_cause = C_CAP_TAG;
+    cap_y = '0; cap_m = '0; cap_fault = 1'b0; cap_cause = C_CAP_TAG; cap_tv = a;
     case (cap_fn)
       4'd0: begin cap_y = cap_x; cap_m = ma; end                     // csetaddr
       4'd1: begin cap_y = a + cap_x; cap_m = ma; end                 // cincaddr
       4'd2: begin                                                    // csetbnd
         cap_y = a;
-        cap_m = {1'b1, a_perm, a, cap_ntop};
+        cap_m = {1'b1, 16'd0, a_perm, a, cap_ntop};
         if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
         else if (a < a_base || cap_ntop > a_top) begin cap_fault = 1'b1; cap_cause = C_CAP_BOUNDS; end
       end
       4'd3: begin                                                    // candperm
         cap_y = a;
-        cap_m = a_tag ? {1'b1, a_perm & cap_x[PW-1:0], a_base, a_top} : '0;
+        cap_m = a_tag ? {1'b1, 16'd0, a_perm & cap_x[PW-1:0], a_base, a_top} : '0;
       end
       4'd4: cap_y = a_base;                                          // cgetbase
       4'd5: cap_y = cap_len[128] ? {128{1'b1}} : cap_len[127:0];     // cgetlen
@@ -273,14 +279,33 @@ module tx_core #(
       CF_CSETEPCC: begin
         cap_m = ma;
         if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
+        else if (a_sealed) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; end
       end
       CF_CJALR: begin                                                // link = PCC, cursor pc+4
         cap_y = idex_pc + 128'd4; cap_m = pcc_q;
         if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
+        else if (a_sealed) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; end
         else if (!a_perm[2]) begin cap_fault = 1'b1; cap_cause = C_CAP_PERM; end
       end
+      CF_CSEAL, CF_CUNSEAL: begin                                    // rs2 = sealing authority, cursor = otype
+        cap_y = a;
+        cap_m = {1'b1, (cap_fn == CF_CSEAL) ? b[15:0] : 16'd0, a_perm, a_base, a_top};
+        cap_fault = 1'b1; cap_tv = b;
+        if (!a_tag) begin cap_cause = C_CAP_TAG; cap_tv = a; end
+        else if (!b_tag) cap_cause = C_CAP_TAG;
+        else if ((cap_fn == CF_CSEAL) ? a_sealed : !a_sealed) begin cap_cause = C_CAP_SEALED; cap_tv = a; end
+        else if (b_sealed) cap_cause = C_CAP_SEALED;
+        else if (!b_perm[(cap_fn == CF_CSEAL) ? 5 : 6]) cap_cause = C_CAP_PERM;
+        else if (b < b_base || {1'b0, b} >= b_top) cap_cause = C_CAP_BOUNDS;
+        else if (cap_fn == CF_CSEAL && (b[15:0] == 16'd0 || |b[127:16])) cap_cause = C_CAP_BOUNDS;
+        else if (cap_fn == CF_CUNSEAL && b != {112'd0, a_ot}) cap_cause = C_CAP_SEALED;
+        else cap_fault = 1'b0;
+      end
+      CF_CGETTYPE: cap_y = {112'd0, a_ot};
       default: cap_y = a;                                            // cclrtag
     endcase
+    // sealed capabilities are immutable: csetaddr / cincaddr / csetbnd / candperm trap
+    if (cap_fn <= 4'd3 && a_sealed) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; cap_tv = a; end
   end
 
   // ---- wide immediate
@@ -312,7 +337,8 @@ module tx_core #(
   logic [3:0]  mem_cause;
   always_comb begin
     mem_fault = 1'b1;
-    if (a_tag && !need_p) mem_cause = C_CAP_PERM;
+    if (a_sealed) mem_cause = C_CAP_SEALED;
+    else if (a_tag && !need_p) mem_cause = C_CAP_PERM;
     else if (a_tag && is_csc && b_tag && !a_perm[4]) mem_cause = C_CAP_PERM;   // STORE_CAP
     else if (a_tag && (ea < a_base || ea_end > a_top)) mem_cause = C_CAP_BOUNDS;
     else if (misalign) mem_cause = C_ALIGN;
@@ -357,7 +383,7 @@ module tx_core #(
     if (idex_fault) begin ex_trap = 1'b1; ex_cause = idex_fcause; ex_tval = idex_pc; end
     else if (ex_k[K_ILL]) begin ex_trap = 1'b1; ex_cause = C_ILLEGAL; ex_tval = {96'd0, idex_inst}; end
     else if (is_mem && mem_fault) begin ex_trap = 1'b1; ex_cause = mem_cause; ex_tval = ea; end
-    else if ((ex_k[K_CAPR] | ex_k[K_CAPI]) && cap_fault) begin ex_trap = 1'b1; ex_cause = cap_cause; ex_tval = a; end
+    else if ((ex_k[K_CAPR] | ex_k[K_CAPI]) && cap_fault) begin ex_trap = 1'b1; ex_cause = cap_cause; ex_tval = cap_tv; end
   end
 
   // ======================================================================== MEM

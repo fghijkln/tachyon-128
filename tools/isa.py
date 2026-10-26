@@ -51,8 +51,9 @@ SIMD_UNARY = {"vsplat", "vsum"}
 LANE_SUFFIX = {"b": 0, "h": 1, "w": 2, "d": 3}     # 8, 16, 32, 64-bit lanes
 LANE_BITS = [8, 16, 32, 64]
 CAP_FUNCS = ["csetaddr", "cincaddr", "csetbnd", "candperm", "cgetbase", "cgetlen",
-             "cgetperm", "cgettag", "cclrtag", "cgetpcc", "csetepcc", "cjalr"]
-CAP_UNARY = {"cgetbase", "cgetlen", "cgetperm", "cgettag", "cclrtag", "cjalr"}   # rd, rs1
+             "cgetperm", "cgettag", "cclrtag", "cgetpcc", "csetepcc", "cjalr",
+             "cseal", "cunseal", "cgettype"]
+CAP_UNARY = {"cgetbase", "cgetlen", "cgetperm", "cgettag", "cclrtag", "cjalr", "cgettype"}   # rd, rs1
 CAP_RD_ONLY = {"cgetpcc"}                                                     # rd
 CAP_RS1_ONLY = {"csetepcc"}                                                   # rs1
 
@@ -78,12 +79,16 @@ CAUSE_CAP_BOUNDS = 3
 CAUSE_CAP_PERM = 4
 CAUSE_ALIGN = 5
 CAUSE_ACCESS = 6
+CAUSE_CAP_SEALED = 7
 CAUSE_NAMES = {1: "illegal-instruction", 2: "capability-tag", 3: "capability-bounds",
-               4: "capability-permission", 5: "misaligned", 6: "access-fault"}
+               4: "capability-permission", 5: "misaligned", 6: "access-fault", 7: "capability-sealed"}
 
 # capability permissions
-PERM_LOAD, PERM_STORE, PERM_EXEC, PERM_LOAD_CAP, PERM_STORE_CAP = 1, 2, 4, 8, 16
-PERM_ALL = 0x1F
+PERM_LOAD, PERM_STORE, PERM_EXEC, PERM_LOAD_CAP, PERM_STORE_CAP, PERM_SEAL, PERM_UNSEAL = 1, 2, 4, 8, 16, 32, 64
+PERM_ALL = 0x7F
+OTYPE_MAX = 0xFFFF           # otype 0 = unsealed; sealed capabilities carry otype 1..0xFFFF
+NULL_META = (0, 0, 0, 0)     # (perm, base, top, otype)
+ROOT_META = (PERM_ALL, 0, TOP_MAX, 0)
 GRANULE = 16                 # tagged-memory granule (bytes): one shadow tag + metadata per granule
 
 # ---------------------------------------------------------------- registers

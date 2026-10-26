@@ -71,8 +71,8 @@ module tb (
         else begin
           retired <= retired + 1;
           if (tr_we) begin
-            if (tr_meta[M_TAG]) $fwrite(ftr, "%0h %0d %0h 1 %0d %0h %0h\n", tr_pc, tr_rd, tr_val,
-                                      tr_meta[M_PERM +: PW], tr_meta[256:129], tr_meta[128:0]);
+            if (tr_meta[M_TAG]) $fwrite(ftr, "%0h %0d %0h 1 %0d %0h %0h %0h\n", tr_pc, tr_rd, tr_val,
+                                      tr_meta[M_PERM +: PW], tr_meta[256:129], tr_meta[128:0], tr_meta[M_OT +: 16]);
             else $fwrite(ftr, "%0h %0d %0h 0\n", tr_pc, tr_rd, tr_val);
           end else $fwrite(ftr, "%0h 0 0 0\n", tr_pc);
         end
@@ -88,7 +88,8 @@ module tb (
     $fclose(fm);
     fm = $fopen(tagf, "w");
     for (int i = 0; i < RAMW; i++)
-      if (tmeta[i][M_TAG]) $fwrite(fm, "%0h %0d %0h %0h\n", i, tmeta[i][M_PERM +: PW], tmeta[i][256:129], tmeta[i][128:0]);
+      if (tmeta[i][M_TAG]) $fwrite(fm, "%0h %0d %0h %0h %0h\n", i, tmeta[i][M_PERM +: PW], tmeta[i][256:129],
+                                   tmeta[i][128:0], tmeta[i][M_OT +: 16]);
     $fclose(fm);
     fs = $fopen(statf, "w");
     $fwrite(fs, "cycles %0d\nretired %0d\nexit %0d\n", cycles, retired, exit_code);

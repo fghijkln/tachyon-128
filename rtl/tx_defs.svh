@@ -11,8 +11,9 @@ localparam logic [5:0] OP_BEQ = 6'h30, OP_BNE = 6'h31, OP_BLT = 6'h32, OP_BGE = 
 localparam logic [5:0] OP_JAL = 6'h38, OP_JALR = 6'h39, OP_HALT = 6'h3C, OP_CSRR = 6'h3D,
                        OP_CSRW = 6'h3E, OP_ERET = 6'h3F;
 
-localparam logic [7:0] N_ALU = 8'd19, N_MULDIV = 8'd6, N_CAP = 8'd12;
-localparam logic [3:0] CF_CGETPCC = 4'd9, CF_CSETEPCC = 4'd10, CF_CJALR = 4'd11;
+localparam logic [7:0] N_ALU = 8'd19, N_MULDIV = 8'd6, N_CAP = 8'd15;
+localparam logic [3:0] CF_CGETPCC = 4'd9, CF_CSETEPCC = 4'd10, CF_CJALR = 4'd11,
+                       CF_CSEAL = 4'd12, CF_CUNSEAL = 4'd13, CF_CGETTYPE = 4'd14;
 localparam logic [5:0] N_SIMD = 6'd19;
 localparam logic [13:0] N_CSR = 14'd5;
 localparam logic [4:0] SIMD_VMUL = 5'd13;
@@ -24,16 +25,17 @@ localparam logic [4:0] A_ADD = 0, A_SUB = 1, A_AND = 2, A_OR = 3, A_XOR = 4, A_S
 
 // trap causes
 localparam logic [3:0] C_ILLEGAL = 1, C_CAP_TAG = 2, C_CAP_BOUNDS = 3, C_CAP_PERM = 4,
-                       C_ALIGN = 5, C_ACCESS = 6;
+                       C_ALIGN = 5, C_ACCESS = 6, C_CAP_SEALED = 7;
 
 // MMIO
 localparam logic [127:0] MMIO_EXIT = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0010};
 
-// metadata packing: {tag, perm[PW-1:0], base[127:0], top[128:0]}
-//   perm bits: 0 LOAD, 1 STORE, 2 EXEC, 3 LOAD_CAP, 4 STORE_CAP
-localparam int PW = 5;
-localparam int MW = 1 + PW + 128 + 129;
+// metadata packing: {tag, otype[15:0], perm[PW-1:0], base[127:0], top[128:0]}
+//   perm bits: 0 LOAD, 1 STORE, 2 EXEC, 3 LOAD_CAP, 4 STORE_CAP, 5 SEAL, 6 UNSEAL; otype 0 = unsealed
+localparam int PW = 7;
+localparam int MW = 1 + 16 + PW + 128 + 129;
 localparam int M_TAG = MW - 1;          // tag bit
 localparam int M_PERM = 257;            // perm  = meta[M_PERM +: PW]
-localparam logic [PW-1:0] PERM_ALL = 5'h1F;
-localparam logic [MW-1:0] ROOT_META = {1'b1, PERM_ALL, 128'd0, 1'b1, 128'd0};
+localparam int M_OT = M_PERM + PW;      // otype = meta[M_OT +: 16]
+localparam logic [PW-1:0] PERM_ALL = 7'h7F;
+localparam logic [MW-1:0] ROOT_META = {1'b1, 16'd0, PERM_ALL, 128'd0, 1'b1, 128'd0};

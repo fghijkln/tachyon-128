@@ -101,13 +101,13 @@ class Machine:
         self.ram[:len(binary)] = binary
         self.val = [0] * NREGS
         self.tag = [0] * NREGS
-        self.meta = [(0, 0, 0)] * NREGS          # (perm, base, top)
+        self.meta = [NULL_META] * NREGS          # (perm, base, top, otype)
         # root capability lives in r63 (rc) at reset: all permissions over the whole space
-        self.val[63], self.tag[63], self.meta[63] = 0, 1, (PERM_ALL, 0, TOP_MAX)
+        self.val[63], self.tag[63], self.meta[63] = 0, 1, ROOT_META
         self.pc = 0
         self.csr = [0] * NUM_CSRS
-        self.pcc = (PERM_ALL, 0, TOP_MAX)    # program-counter capability (always tagged)
-        self.epcc = (PERM_ALL, 0, TOP_MAX)   # PCC saved on trap, restored by eret
+        self.pcc = ROOT_META                 # program-counter capability (always tagged, never sealed)
+        self.epcc = ROOT_META                # PCC saved on trap, restored by eret
         self.mtag = {}              # shadow tag memory: granule index -> (perm, base, top) when tagged
         self.console = bytearray()
         self.trace = []
@@ -116,18 +116,20 @@ class Machine:
         self.exit_code = 0
 
     # ---------------------------------------------------------------- register helpers
-    def rd_write(self, rd, v, tag=0, meta=(0, 0, 0)):
+    def rd_write(self, rd, v, tag=0, meta=NULL_META):
         if rd == 0:
             return None
         self.val[rd] = v & MASK
         self.tag[rd] = tag
-        self.meta[rd] = meta if tag else (0, 0, 0)
+        self.meta[rd] = meta if tag else NULL_META
         return rd
 
     # ---------------------------------------------------------------- memory
     def check_access(self, rs1, ea, size, is_store, store_cap=False):
         if self.tag[rs1]:
-            perm, base, top = self.meta[rs1]
+            perm, base, top, otype = self.meta[rs1]
+            if otype:
+                raise Trap(CAUSE_CAP_SEALED, ea)
             need = PERM_STORE if is_store else PERM_LOAD
             if not perm & need:
                 raise Trap(CAUSE_CAP_PERM, ea)
@@ -168,12 +170,12 @@ class Machine:
         """clc: 128-bit value + tag/metadata from the shadow memory. Returns (value, tag, meta)."""
         kind = self.check_access(rs1, ea, 16, False)
         if kind == "mmio":
-            return 0, 0, (0, 0, 0)
+            return 0, 0, NULL_META
         v = int.from_bytes(self.ram[ea:ea + 16], "little")
         g = ea // GRANULE
         if g in self.mtag and (not self.tag[rs1] or self.meta[rs1][0] & PERM_LOAD_CAP):
             return v, 1, self.mtag[g]
-        return v, 0, (0, 0, 0)
+        return v, 0, NULL_META
 
     def store_cap(self, rs1, ea, A):
         """csc: store register A's value and (if tagged) its capability metadata."""
@@ -190,7 +192,7 @@ class Machine:
     # ---------------------------------------------------------------- one instruction
     def step(self):
         pc = self.pc
-        pperm, pbase, ptop = self.pcc
+        pperm, pbase, ptop, _ = self.pcc
         if not pperm & PERM_EXEC:
             raise Trap(CAUSE_CAP_PERM, pc)
         if pc < pbase or pc + 4 > ptop:
@@ -248,15 +250,21 @@ class Machine:
             elif fn == "csetepcc":
                 if not self.tag[rs1]:
                     raise Trap(CAUSE_CAP_TAG, x1)
+                if self.meta[rs1][3]:
+                    raise Trap(CAUSE_CAP_SEALED, x1)
                 self._new_epcc = self.meta[rs1]
             elif fn == "cjalr":
                 if not self.tag[rs1]:
                     raise Trap(CAUSE_CAP_TAG, x1)
+                if self.meta[rs1][3]:
+                    raise Trap(CAUSE_CAP_SEALED, x1)
                 if not self.meta[rs1][0] & PERM_EXEC:
                     raise Trap(CAUSE_CAP_PERM, x1)
                 npc = x1 & ~3
                 self._new_pcc = self.meta[rs1]
                 wrote = self.rd_write(rd, pc + 4, 1, self.pcc)    # link = PCC with cursor pc+4
+            elif fn in ("cseal", "cunseal"):
+                wrote = self.seal_op(fn, rd, rs1, rs2)
             else:
                 wrote = self.cap_op(fn, rd, rs1, x2)
         elif op in I_OPS.values():
@@ -336,21 +344,54 @@ class Machine:
             raise Trap(CAUSE_ILLEGAL, w)
         return pc, npc, wrote
 
+    def seal_op(self, fn, rd, rs1, rs2):
+        a, t1, (p1, b1, top1, ot1) = self.val[rs1], self.tag[rs1], self.meta[rs1]
+        k, t2, (p2, b2, top2, ot2) = self.val[rs2], self.tag[rs2], self.meta[rs2]
+        if not t1:
+            raise Trap(CAUSE_CAP_TAG, a)
+        if not t2:
+            raise Trap(CAUSE_CAP_TAG, k)
+        if fn == "cseal":
+            if ot1:
+                raise Trap(CAUSE_CAP_SEALED, a)
+            if ot2:
+                raise Trap(CAUSE_CAP_SEALED, k)
+            if not p2 & PERM_SEAL:
+                raise Trap(CAUSE_CAP_PERM, k)
+            if k < b2 or k >= top2 or k == 0 or k > OTYPE_MAX:
+                raise Trap(CAUSE_CAP_BOUNDS, k)
+            return self.rd_write(rd, a, 1, (p1, b1, top1, k))
+        if not ot1:
+            raise Trap(CAUSE_CAP_SEALED, a)
+        if ot2:
+            raise Trap(CAUSE_CAP_SEALED, k)
+        if not p2 & PERM_UNSEAL:
+            raise Trap(CAUSE_CAP_PERM, k)
+        if k < b2 or k >= top2:
+            raise Trap(CAUSE_CAP_BOUNDS, k)
+        if k != ot1:
+            raise Trap(CAUSE_CAP_SEALED, k)
+        return self.rd_write(rd, a, 1, (p1, b1, top1, 0))
+
     def cap_op(self, fn, rd, rs1, x2):
-        t, (perm, base, top), a = self.tag[rs1], self.meta[rs1], self.val[rs1]
+        t, (perm, base, top, otype), a = self.tag[rs1], self.meta[rs1], self.val[rs1]
+        if t and otype and fn in ("csetaddr", "cincaddr", "csetbnd", "candperm"):
+            raise Trap(CAUSE_CAP_SEALED, a)     # sealed capabilities are immutable
         if fn == "csetaddr":
-            return self.rd_write(rd, x2, t, (perm, base, top))
+            return self.rd_write(rd, x2, t, (perm, base, top, 0))
         if fn == "cincaddr":
-            return self.rd_write(rd, a + x2, t, (perm, base, top))
+            return self.rd_write(rd, a + x2, t, (perm, base, top, 0))
         if fn == "csetbnd":
             if not t:
                 raise Trap(CAUSE_CAP_TAG, a)
             ntop = a + x2
             if a < base or ntop > top:
                 raise Trap(CAUSE_CAP_BOUNDS, a)
-            return self.rd_write(rd, a, 1, (perm, a, ntop))
+            return self.rd_write(rd, a, 1, (perm, a, ntop, 0))
         if fn == "candperm":
-            return self.rd_write(rd, a, t, (perm & x2 & PERM_ALL, base, top))
+            return self.rd_write(rd, a, t, (perm & x2 & PERM_ALL, base, top, 0))
+        if fn == "cgettype":
+            return self.rd_write(rd, otype)
         if fn == "cgetbase":
             return self.rd_write(rd, base)
         if fn == "cgetlen":
@@ -369,8 +410,8 @@ class Machine:
             return f"{pc:x} 0 0 0"
         line = f"{pc:x} {rd} {self.val[rd]:x} {self.tag[rd]}"
         if self.tag[rd]:
-            p, b, t = self.meta[rd]
-            line += f" {p} {b:x} {t:x}"
+            p, b, t, o = self.meta[rd]
+            line += f" {p} {b:x} {t:x} {o:x}"
         return line
 
     def run(self, max_steps=5_000_000):
@@ -379,7 +420,7 @@ class Machine:
                 pc, npc, wrote = self.step()
             except Trap as tr:
                 self.csr[1], self.csr[2], self.csr[3] = self.pc, tr.cause, tr.tval
-                self.epcc, self.pcc = self.pcc, (PERM_ALL, 0, TOP_MAX)   # handler runs with the root PCC
+                self.epcc, self.pcc = self.pcc, ROOT_META   # handler runs with the root PCC
                 self.trace.append(f"T {tr.cause} {self.pc:x} {tr.tval:x}")
                 if self.csr[0] == 0:
                     self.halted = ("trap", tr.cause)
@@ -406,16 +447,16 @@ class Machine:
         return self
 
     def tagdump(self):
-        """Shadow tag memory as text lines 'granule perm base top' (tagged granules only, ascending)."""
-        return [f"{g:x} {p} {b:x} {t:x}" for g, (p, b, t) in sorted(self.mtag.items())]
+        """Shadow tag memory as lines 'granule perm base top otype' (tagged granules only, ascending)."""
+        return [f"{g:x} {p} {b:x} {t:x} {o:x}" for g, (p, b, t, o) in sorted(self.mtag.items())]
 
     def regdump(self):
         out = []
         for i in range(NREGS):
             s = f"r{i:<2} {self.val[i]:032x} tag={self.tag[i]}"
             if self.tag[i]:
-                p, b, t = self.meta[i]
-                s += f" perm={p} base={b:x} top={t:x}"
+                p, b, t, o = self.meta[i]
+                s += f" perm={p} base={b:x} top={t:x} otype={o:x}"
             out.append(s)
         return "\n".join(out)
 

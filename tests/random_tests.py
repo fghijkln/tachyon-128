@@ -4,7 +4,7 @@ Each program: random register init (128-bit values via li/wide immediates), a tr
 that skips faulting instructions, then a weighted random mix of every instruction class:
 ALU (R/I), SIMD (all lanes), MUL/DIV, capability ops, wide immediates, loads/stores of all
 sizes (through an untagged base, a bounded capability, and random bases -> faults), capability
-spills/reloads (clc/csc, incl. tag clearing by data stores and LOAD_CAP/STORE_CAP checks), forward
+sealing/unsealing (cseal/cunseal with a sealing authority, sealed-use faults), spills/reloads (clc/csc, incl. tag clearing by data stores and LOAD_CAP/STORE_CAP checks), forward
 branches, counted backward loops, JAL, calls into PCC-bounded code regions through cjalr (incl.
 short bounds -> fetch faults, missing EXEC, untagged targets), CSR traffic and illegal words.  Sources are biased
 toward recently written registers to stress forwarding and interlocks.
@@ -93,12 +93,15 @@ class Gen:
                 if d not in (a, b):
                     self.emit(f"{partner} r{self.dst()}, r{a}, r{b}")
         elif k == "cap":
-            f = r.choice([c for c in CAP_FUNCS if c != "cjalr"] + ["cincaddri", "csetbndi"])
+            f = r.choice([c for c in CAP_FUNCS if c != "cjalr"] + ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal"])
             s1 = r.choice([60, 63, self.src(), self.src()])
             if f in CAP_RD_ONLY:
                 self.emit(f"{f} r{self.dst()}")
             elif f in CAP_RS1_ONLY:
                 self.emit(f"{f} r{s1}")
+            elif f in ("cseal", "cunseal"):
+                auth = r.choice([55, 55, 55, 63, self.src()])
+                self.emit(f"{f} r{self.dst()}, r{s1 if r.random() < 0.6 else self.src()}, r{auth}")
             elif f in CAP_UNARY:
                 self.emit(f"{f} r{self.dst()}, r{s1}")
             elif f == "cincaddri":
@@ -209,6 +212,10 @@ def gen_program(seed, n=None):
     elif r.random() < 0.3:
         g.emit(f"li r6, {r.choice([0x0F, 0x17, 0x1B])}")   # drop LOAD_CAP or STORE_CAP or LOAD
         g.emit("candperm r60, r60, r6")
+    g.emit("li r54, 0x60")                  # sealing authority (SEAL|UNSEAL), cursor = small otype
+    g.emit("candperm r55, rc, r54")
+    g.emit(f"li r54, {r.choice([0, 1, 1, 2, 3, 3, 0x10000])}")
+    g.emit("csetaddr r55, r55, r54")
     for reg in POOL:
         if r.random() < 0.8:
             g.emit(f"li r{reg}, {g.val()}")

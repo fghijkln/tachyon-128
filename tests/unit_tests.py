@@ -547,6 +547,86 @@ h2:     addi r53, r53, 1
         csrw epc, r51
         eret
 """
+    # ---------------- sealed capabilities
+    T["seal_ops"] = PRE + setup + """
+        li r6, 64
+        csetaddr r10, rc, r5
+        csetbnd r10, r10, r6     # data capability
+        li r6, 0x60              # SEAL | UNSEAL
+        candperm r11, rc, r6     # sealing root
+        li r7, 42
+        csetaddr r12, r11, r7    # sealing authority for otype 42
+        cseal r13, r10, r12      # r13 = sealed (otype 42)
+        cgettype r14, r13
+        cgettag r15, r13
+        cgetlen r16, r13
+        lq r17, 0(r13)           # deref sealed -> cap-sealed
+        sq r7, 0(r13)            # -> cap-sealed
+        clc r17, 0(r13)          # -> cap-sealed
+        csc r7, 0(r13)           # -> cap-sealed
+        cincaddri r18, r13, 16   # modify sealed -> cap-sealed
+        csetaddr r18, r13, r7
+        cincaddr r18, r13, r7
+        csetbndi r18, r13, 8
+        candperm r18, r13, r7
+        cjalr r1, r13            # jump through sealed -> cap-sealed
+        csetepcc r13             # -> cap-sealed
+        csc r13, 0(r5)           # sealed caps can be stored ...
+        clc r19, 0(r5)           # ... and reloaded, still sealed
+        cgettype r20, r19
+        cunseal r21, r19, r12    # unseal with matching authority
+        cgettype r22, r21
+        lq r23, 16(r21)          # usable again
+        cclrtag r24, r13
+        li r8, 43
+        csetaddr r25, r11, r8
+        cunseal r26, r13, r25    # wrong otype -> cap-sealed
+        cseal r26, r13, r12      # already sealed -> cap-sealed
+        cseal r26, r10, r13      # sealed authority -> cap-sealed
+        cunseal r26, r10, r12    # not sealed -> cap-sealed
+        li r9, 0x40
+        candperm r27, r12, r9    # UNSEAL only
+        cseal r26, r10, r27      # no SEAL -> cap-permission
+        cunseal r28, r13, r27    # ok
+        li r9, 0x20
+        candperm r29, r12, r9    # SEAL only
+        cunseal r26, r13, r29    # no UNSEAL -> cap-permission
+        cseal r26, r10, r0       # untagged authority -> cap-tag
+        cseal r26, r5, r12       # untagged rs1 -> cap-tag
+        cunseal r26, r5, r12     # untagged rs1 -> cap-tag
+        csetaddr r30, r11, r0
+        cseal r26, r10, r30      # otype 0 -> cap-bounds
+        li r7, 0x10000
+        csetaddr r30, r11, r7
+        cseal r26, r10, r30      # otype > 0xFFFF -> cap-bounds
+        li r7, 100
+        csetaddr r31, r11, r7
+        csetbndi r31, r31, 10    # authority for otypes [100, 110)
+        cseal r32, r10, r31      # ok: otype 100
+        cincaddri r33, r31, 10
+        cseal r26, r10, r33      # cursor == top -> cap-bounds
+        cunseal r26, r32, r33    # cursor out of bounds -> cap-bounds
+        cgettype r34, r32
+        cgettype r35, rc
+        cgettype r36, r5
+        cgetperm r37, rc
+        addi r38, r38, 1
+""" + POST + handler + DATA
+    T["seal_hazards"] = PRE + setup + """
+        li r6, 7
+        csetaddr r11, rc, r6
+        csetaddr r10, rc, r5
+        cseal r12, r10, r11      # EX/MEM forwarding of both capability operands
+        cgettype r13, r12
+        lq r14, 0(r12)           # forwarded sealed base -> cap-sealed
+        csc r12, 16(r5)
+        clc r15, 16(r5)
+        cunseal r16, r15, r11    # load-use on a sealed capability
+        lq r17, 0(r16)
+        sb r0, 16(r5)            # data store clears the sealed granule's tag
+        clc r18, 16(r5)
+        cgettag r19, r18
+""" + POST + handler + DATA
     T["mmio_exit"] = PRE + """
         li r4, -0x10000
         li r5, 'H'

@@ -17,6 +17,7 @@
   1. **硬件能力指针（CHERI 风格）**：每个寄存器带隐藏的 tag 位 + 权限 + 基址 + 上界（“胖寄存器”）。经过带 tag 的指针访存时，硬件检查权限和边界；能力只能单调缩小（不能扩大边界、不能增加权限），普通整数运算会清除 tag，因此指针无法伪造。复位时 r63（`rc`）持有根能力。
      **v2 带标签内存**：每 16 字节粒度一个影子 tag 位 + 元数据，`csc`/`clc` 可把能力完整地存入/取出内存（需 STORE_CAP/LOAD_CAP 权限），任何普通数据写入都会清除该粒度的 tag。
      **v2 PCC**：取指受程序计数器能力（PCC）检查（越界或无 EXEC 权限即陷入），`cjalr` 通过能力寄存器跳转并设置 PCC，同时返回链接能力。
+     **v2 密封能力**：`cseal`/`cunseal` 用带 SEAL/UNSEAL 权限的授权能力（其游标即 otype）密封/解封；密封后的能力不能解引用、不能修改、不能跳转。
   2. **寄存器内 SIMD 通道**：一个 128 位寄存器可视为 16×8 / 8×16 / 4×32 / 2×64 位通道，支持加减、饱和加减、min/max、比较掩码、乘法、广播、横向求和、通道移位。
   3. **宽立即数 / 常量拼接**：`wli`/`wins` 把 16 位立即数放到 8 个槽位中任意一个，汇编器的 `li` 伪指令自动选出最短序列。
 - **异常**：非法指令、能力错误（tag/边界/权限）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
@@ -66,11 +67,11 @@
 | r44–r62 | — | general |
 | r63 | `rc` | **root capability** at reset |
 
-Each GPR is a *fat register*: `{value[127:0], tag, perm[4:0], base[127:0], top[128:0]}`.
+Each GPR is a *fat register*: `{value[127:0], tag, otype[15:0], perm[6:0], base[127:0], top[128:0]}`.
 The side-band is invisible to ordinary instructions. **Invariant:** when `tag = 0` the side-band is all zero.
 
 At reset all registers read as zero and untagged, except `rc` (r63), which holds the root capability:
-`tag=1, perm=all (0x1F), base=0, top=2^128, value=0`. PC = 0. All CSRs = 0. Shadow tag memory is all clear.
+`tag=1, perm=all (0x7F), otype=0 (unsealed), base=0, top=2^128, value=0`. PC = 0. All CSRs = 0. Shadow tag memory is all clear.
 
 ## 2. Instruction formats
 
@@ -169,7 +170,9 @@ remainder = 0. No trap is raised (RISC-V convention).
 
 Access checks, in priority order (the first failing check raises its trap; `tval = ea`):
 
+0. if `rs1` is **sealed** (§5.1.3) → *capability-sealed*
 1. if `rs1` is **tagged**: permission (`LOAD` for loads, `STORE` for stores) → *capability-permission*
+   (`csc` of a tagged value additionally needs `STORE_CAP`, §5.1.1)
 2. if `rs1` is **tagged**: `base ≤ ea` and `ea + size ≤ top` → *capability-bounds*
 3. `ea mod size = 0` → *misaligned*
 4. `ea` in RAM or in the MMIO page → otherwise *access-fault*
@@ -205,7 +208,7 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 ### 5.1 Hardware capabilities (CHERI-inspired fat pointers)
 
 A *capability* is a register whose hidden tag is set. It grants access to `[base, top)` with permissions
-`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC (instruction fetch, §5.1.2), bit3 LOAD_CAP, bit4 STORE_CAP). Its value is the current address (cursor),
+`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC (instruction fetch, §5.1.2), bit3 LOAD_CAP, bit4 STORE_CAP, bit5 SEAL, bit6 UNSEAL) and an object type `otype` (0 = unsealed, §5.1.3). Its value is the current address (cursor),
 a full 128-bit address — bounds are stored at full precision in the side-band, so no address bits are
 sacrificed to compression, and a cursor may move out of bounds without losing the tag (it simply cannot
 be dereferenced there).
@@ -224,7 +227,7 @@ tag. Tags therefore descend only from the root capability in `rc` at reset.
 | 0 | `csetaddr rd, rs1, rs2` | rd = rs1 with cursor := rs2.value (tag/bounds kept) |
 | 1 | `cincaddr rd, rs1, rs2` | rd = rs1 with cursor += rs2.value |
 | 2 | `csetbnd rd, rs1, rs2` | requires rs1 tagged (else *cap-tag*); new = [rs1.cursor, rs1.cursor + rs2) must lie within rs1's bounds (else *cap-bounds*); rd = tagged, same perms, base = cursor = rs1.cursor |
-| 3 | `candperm rd, rs1, rs2` | perm := perm & rs2[4:0] (untagged rs1 → untagged result) |
+| 3 | `candperm rd, rs1, rs2` | perm := perm & rs2[6:0] (untagged rs1 → untagged result) |
 | 4 | `cgetbase rd, rs1` | base (0 if untagged) |
 | 5 | `cgetlen rd, rs1` | top − base, saturated to 2^128−1 |
 | 6 | `cgetperm rd, rs1` | perm |
@@ -233,6 +236,9 @@ tag. Tags therefore descend only from the root capability in `rc` at reset.
 | 9 | `cgetpcc rd` | rd = PCC (tagged) with cursor = pc of this instruction |
 | 10 | `csetepcc rs1` | EPCC := rs1's capability; rs1 untagged → *cap-tag*; rd is not written |
 | 11 | `cjalr rd, rs1` | capability jump, §5.1.2 |
+| 12 | `cseal rd, rs1, rs2` | seal rs1 with otype = rs2.cursor (§5.1.3) |
+| 13 | `cunseal rd, rs1, rs2` | unseal rs1 using authority rs2 (§5.1.3) |
+| 14 | `cgettype rd, rs1` | otype (0 if unsealed or untagged) |
 | — | `cincaddri rd, rs1, simm14` (op 0x11) | immediate form of `cincaddr` |
 | — | `csetbndi rd, rs1, uimm14` (op 0x12) | immediate form of `csetbnd` |
 
@@ -251,7 +257,7 @@ sq        t2, 64(s0)        # -> capability-bounds trap, precise, tval = buffer+
 ### 5.1.1 Tagged memory (v2): `clc` / `csc`
 
 Memory is divided into 16-byte **granules**. Each RAM granule has an architecturally hidden **shadow
-entry** `{tag, perm, base, top}` (the same side-band a fat register carries). Because TACHYON-128 keeps
+entry** `{tag, otype, perm, base, top}` (the same side-band a fat register carries). Because TACHYON-128 keeps
 full-precision bounds instead of compressing them into the 128-bit word, the shadow entry holds the whole
 metadata, not just the tag bit; ordinary loads cannot read it and ordinary stores cannot write it.
 
@@ -302,6 +308,29 @@ cjalr     ra, t0           # ra = link capability back into the caller's PCC
 func: ...  cjalr zero, ra
 ```
 
+### 5.1.3 Sealed capabilities (minimal)
+
+A tagged capability with `otype ≠ 0` is **sealed**: an opaque token that can be stored, copied, loaded and
+passed around, but not used or changed until it is unsealed by whoever holds the matching authority.
+
+* **Sealing authority** is any tagged, unsealed capability with SEAL (bit5) / UNSEAL (bit6) whose **cursor is
+  the otype** and lies within its bounds (`base ≤ cursor < top`). Bounding an authority (`csetbnd`) limits which
+  otypes its holder can use.
+* `cseal rd, rs1, rs2`, checks in order (`tval` = the offending operand's cursor): rs1 untagged → *cap-tag*;
+  rs2 untagged → *cap-tag*; rs1 sealed → *cap-sealed*; rs2 sealed → *cap-sealed*; rs2 lacks SEAL → *cap-perm*;
+  rs2.cursor outside rs2's bounds, `= 0` or `> 0xFFFF` → *cap-bounds*. Result: rs1 with `otype = rs2.cursor`.
+* `cunseal rd, rs1, rs2`: rs1 untagged → *cap-tag*; rs2 untagged → *cap-tag*; rs1 **not** sealed → *cap-sealed*;
+  rs2 sealed → *cap-sealed*; rs2 lacks UNSEAL → *cap-perm*; rs2.cursor out of bounds → *cap-bounds*;
+  rs2.cursor ≠ rs1.otype → *cap-sealed*. Result: rs1 with `otype = 0`.
+* A sealed capability **cannot be dereferenced**: a load, store, `clc` or `csc` through a sealed base raises
+  *cap-sealed* (checked right after the tag, before permissions; `tval` = ea).
+* A sealed capability **cannot be modified**: `csetaddr`, `cincaddr(i)`, `csetbnd(i)`, `candperm` with a sealed
+  `rs1` raise *cap-sealed* (`tval` = cursor). `cjalr` and `csetepcc` through a sealed capability raise *cap-sealed*
+  (after the tag check). `cget*`, `cclrtag`, `csc` *of* a sealed value and `clc` back are allowed; the shadow
+  memory keeps the otype.
+* Every derivation that produces a tagged result from an unsealed capability yields `otype = 0`; the PCC and the
+  `cjalr` link are never sealed. (No sealed-entry "sentry" jumps in this minimal version.)
+
 ### 5.2 SIMD lanes inside a GPR
 
 `func8 = (sop << 2) | lane`, lane 0/1/2/3 = 8/16/32/64-bit lanes (assembler suffix `.b .h .w .d`).
@@ -333,11 +362,12 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 | cause | Name | Raised by |
 |---|---|---|
 | 1 | illegal-instruction | undefined opcode/func, `vmul.d`, CSR number ≥ 5, the zero word (`tval` = instruction word) |
-| 2 | capability-tag | `csetbnd(i)` on an untagged register |
+| 2 | capability-tag | `csetbnd(i)`, `cjalr`, `csetepcc`, `cseal`, `cunseal` on an untagged register |
 | 3 | capability-bounds | out-of-bounds access through a capability; non-monotonic `csetbnd(i)` |
 | 4 | capability-permission | load/store through a capability lacking LOAD/STORE; `csc` of a tagged value through a capability lacking STORE_CAP |
 | 5 | misaligned | access not naturally aligned |
 | 6 | access-fault | data access outside RAM and MMIO; instruction fetch outside RAM (`tval` = pc) |
+| 7 | capability-sealed | use or modification of a sealed capability; `cseal` of a sealed one; `cunseal` of an unsealed one or with the wrong otype |
 
 Capability faults on instruction fetch (PCC lacks EXEC / pc outside PCC) use causes 4 / 3 with `tval` = pc;
 `cjalr` raises 2 / 4 for an untagged / non-executable target.
@@ -371,7 +401,7 @@ label:  op operands      # comment   (';' also starts a comment)
 
 ## 9. Known limitations (deliberate)
 
-* No sealed capabilities.
+* Sealing is minimal: no sealed entry points ("sentries"/`CInvoke`), no global/local or LOAD_MUTABLE permissions.
 * Single privilege level; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
 * No interrupts, no FPU, no atomics, no fence for self-modifying code.
