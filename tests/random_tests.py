@@ -3,7 +3,8 @@
 Each program: random register init (128-bit values via li/wide immediates), a trap handler
 that skips faulting instructions, then a weighted random mix of every instruction class:
 ALU (R/I), SIMD (all lanes), MUL/DIV, capability ops, wide immediates, loads/stores of all
-sizes (through an untagged base, a bounded capability, and random bases -> faults), forward
+sizes (through an untagged base, a bounded capability, and random bases -> faults), capability
+spills/reloads (clc/csc, incl. tag clearing by data stores and LOAD_CAP/STORE_CAP checks), forward
 branches, counted backward loops, JAL, CSR traffic and illegal words.  Sources are biased
 toward recently written registers to stress forwarding and interlocks.
 """
@@ -25,6 +26,7 @@ class Gen:
         self.out = []
         self.recent = []
         self.lbl = 0
+        self.cslots = []
 
     def val(self):
         r = self.r
@@ -58,8 +60,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3])[0]
         if not allow_ctrl and k in ("br", "loop", "jal"):
             k = "alu"
         if k == "alu":
@@ -118,6 +120,18 @@ class Gen:
             if k == "stcap" and r.random() < 0.15:
                 off = r.choice([1024, -size, 2000])
             self.emit(f"{f} r{self.src()}, {off}(r{base})")
+        elif k in ("clc", "csc"):     # tagged memory: granule-aligned mostly, via r3 (unchecked) or r60 (cap)
+            base = r.choice([3, 60])
+            off = r.randrange(0, 1024, 16) if r.random() < 0.9 else r.choice([8, 4] + ([1024, -16] if base == 60 else []))
+            if k == "csc" and off % 16 == 0 and 0 <= off < 1024:
+                self.cslots.append(off)
+            if k == "clc" and self.cslots and r.random() < 0.7:
+                off = r.choice(self.cslots[-4:])          # reload a recently spilled granule
+            if k == "clc":
+                self.emit(f"clc r{self.dst()}, {off}(r{base})")
+            else:
+                data = r.choice([60, 63, self.src(), self.src()])
+                self.emit(f"csc r{data}, {off}(r{base})")
         elif k == "ldrand":         # random base: mostly access/align/cap faults, never a store
             f = r.choice(list(LOAD_OPS))
             self.emit(f"{f} r{self.dst()}, {r.randint(-64, 64)}(r{self.src()})")
@@ -167,6 +181,9 @@ def gen_program(seed, n=None):
     if r.random() < 0.5:
         g.emit("li r6, 3")              # sometimes a read-only data capability
         g.emit(f"candperm r60, r60, r{r.choice([6, 5])}")
+    elif r.random() < 0.3:
+        g.emit(f"li r6, {r.choice([0x0F, 0x17, 0x1B])}")   # drop LOAD_CAP or STORE_CAP or LOAD
+        g.emit("candperm r60, r60, r6")
     for reg in POOL:
         if r.random() < 0.8:
             g.emit(f"li r{reg}, {g.val()}")

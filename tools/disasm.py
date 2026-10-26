@@ -9,7 +9,9 @@ from isa import *  # noqa: E402,F401,F403
 
 _INV_I = {v: k for k, v in I_OPS.items()}
 _INV_L = {v[0]: k for k, v in LOAD_OPS.items()}
+_INV_L.update({v: k for k, v in CAP_LOAD_OPS.items()})
 _INV_S = {v[0]: k for k, v in STORE_OPS.items()}
+_INV_S.update({v: k for k, v in CAP_STORE_OPS.items()})
 _INV_B = {v: k for k, v in BRANCH_OPS.items()}
 _INV_CSR = {v: k for k, v in CSR_NAMES.items()}
 _INV_LANE = {v: k for k, v in LANE_SUFFIX.items()}

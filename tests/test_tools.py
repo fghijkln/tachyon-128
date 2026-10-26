@@ -16,6 +16,7 @@ import isa  # noqa: E402
 from asm import Assembler, preprocess  # noqa: E402
 from disasm import disasm, decode  # noqa: E402
 from sim import Machine  # noqa: E402
+from run_tests import PROGRAMS  # noqa: E402
 
 
 def check_defs():
@@ -57,7 +58,7 @@ def check_li(count=1000):
 def check_roundtrip():
     from unit_tests import tests
     srcs = list(tests().values())
-    srcs += [preprocess(os.path.join(ROOT, "programs", p + ".s")) for p in ("fib", "fact", "sort", "simd", "capfault")]
+    srcs += [preprocess(os.path.join(ROOT, "programs", p + ".s")) for p in PROGRAMS]
     n = 0
     for src in srcs:
         binary, listing = Assembler().assemble(src)

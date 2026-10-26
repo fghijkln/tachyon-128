@@ -370,6 +370,90 @@ sub:    addi r9, r9, 1
         ret
 end:    nop
 """ + POST
+    # ---------------- tagged memory: clc / csc (shadow tag per 16-byte granule)
+    T["capmem_basic"] = PRE + setup + """
+        li r6, 64
+        csetaddr r10, rc, r5
+        csetbnd r10, r10, r6     # cap A = [data, data+64)
+        csc r10, 32(r5)          # spill cap via untagged base: tag + metadata preserved
+        clc r11, 32(r5)          # reload -> tagged, same perms/bounds
+        cgettag r12, r11
+        cgetlen r13, r11
+        lq r14, 8(r11)           # misaligned through reloaded cap -> trap
+        lq r14, 16(r11)          # deref reloaded cap: ok
+        lq r15, 32(r5)           # plain load of a capability granule: value only, untagged
+        cgettag r16, r15
+        sb r0, 33(r5)            # partial data store into the granule clears its tag
+        clc r17, 32(r5)
+        cgettag r18, r17
+        csc r10, 48(r10)         # store through the cap itself (in bounds)
+        clc r19, 48(r10)
+        csc r6, 48(r10)          # csc of an untagged register clears the tag
+        clc r20, 48(r10)
+        cgettag r21, r20
+        csc r10, 56(r10)         # misaligned csc -> trap
+        csc r10, 64(r10)         # out of bounds -> trap
+        clc r22, 64(r10)         # out of bounds -> trap
+        csc rc, 16(r5)           # spill the root capability
+        clc r23, 16(r5)
+        cgetlen r24, r23
+        addi r25, r23, 0         # integer copy of the reloaded cap: untagged
+        cgettag r26, r25
+        li r7, -0x10000
+        csc r10, 0x20(r7)        # csc to MMIO (hexout): value only
+        clc r27, 0(r7)           # clc from MMIO: 0, untagged
+        li r8, 0x40000
+        clc r28, 0(r8)           # past RAM -> access fault
+        addi r20, r20, 1
+""" + POST + handler + DATA
+    T["capmem_perms"] = PRE + setup + """
+        li r6, 64
+        csetaddr r10, rc, r5
+        csetbnd r10, r10, r6
+        csc r10, 0(r5)           # granule 0 of data holds a tagged cap
+        li r7, 0x17              # LOAD|STORE|EXEC|STORE_CAP (no LOAD_CAP)
+        candperm r11, r10, r7
+        clc r12, 0(r11)          # loads the value, tag stripped (no LOAD_CAP)
+        cgettag r13, r12
+        li r7, 0x0F              # no STORE_CAP
+        candperm r14, r10, r7
+        csc r10, 16(r14)         # storing a tagged cap without STORE_CAP -> cap-permission trap
+        csc r6, 16(r14)          # storing an untagged value is fine
+        clc r15, 0(r14)          # LOAD_CAP present: tagged
+        cgetperm r16, r15
+        li r7, 2
+        candperm r17, r10, r7    # store-only
+        clc r18, 0(r17)          # no LOAD -> cap-permission trap
+        li r7, 1
+        candperm r19, r10, r7    # load-only
+        csc r6, 0(r19)           # no STORE -> cap-permission trap
+        cgetperm r20, rc
+        addi r21, r21, 1
+""" + POST + handler + DATA
+    T["capmem_hazards"] = PRE + setup + """
+        li r6, 48
+        csetaddr r10, rc, r5
+        csetbnd r11, r10, r6     # produced in EX ...
+        csc r11, 0(r5)           # ... forwarded EX/MEM -> csc data (metadata too)
+        clc r12, 0(r5)
+        lq r13, 16(r12)          # clc -> load-use interlock on a capability base
+        clc r14, 0(r5)
+        csc r14, 16(r5)          # clc -> csc data (load-use)
+        clc r15, 16(r5)
+        cincaddri r16, r15, 16   # clc -> cap op (load-use)
+        sq r16, 32(r16)          # bounds: 16+32+16 > 48 -> trap
+        sq r16, 16(r16)          # ok, data store into granule data+32
+        clc r17, 32(r5)          # untagged (data store)
+        cgettag r18, r17
+        csc r16, 0(r5)
+        sd r0, 8(r5)             # sub-granule store clears tag
+        clc r19, 0(r5)
+        cgettag r20, r19
+        csc r16, 0(r5)
+        clc r21, 0(r5)
+        csetbndi r22, r21, 16
+        cgetbase r23, r22
+""" + POST + handler + DATA
     T["mmio_exit"] = PRE + """
         li r4, -0x10000
         li r5, 'H'

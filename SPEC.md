@@ -1,4 +1,4 @@
-# TACHYON-128 Instruction Set Architecture — v1.0
+# TACHYON-128 Instruction Set Architecture — v2.0
 
 > *"Faster than light, wider than life."*  A 128-bit load/store architecture with hardware
 > capabilities, in-register SIMD lanes and wide-immediate constant fusion.
@@ -15,6 +15,7 @@
 - **访存**：8/16/32/64/128 位 load/store（含有符号/无符号扩展），要求自然对齐。
 - **三大“科幻但可靠”的特色（全部在 RTL 中实现并验证）**：
   1. **硬件能力指针（CHERI 风格）**：每个寄存器带隐藏的 tag 位 + 权限 + 基址 + 上界（“胖寄存器”）。经过带 tag 的指针访存时，硬件检查权限和边界；能力只能单调缩小（不能扩大边界、不能增加权限），普通整数运算会清除 tag，因此指针无法伪造。复位时 r63（`rc`）持有根能力。
+     **v2 带标签内存**：每 16 字节粒度一个影子 tag 位 + 元数据，`csc`/`clc` 可把能力完整地存入/取出内存（需 STORE_CAP/LOAD_CAP 权限），任何普通数据写入都会清除该粒度的 tag。
   2. **寄存器内 SIMD 通道**：一个 128 位寄存器可视为 16×8 / 8×16 / 4×32 / 2×64 位通道，支持加减、饱和加减、min/max、比较掩码、乘法、广播、横向求和、通道移位。
   3. **宽立即数 / 常量拼接**：`wli`/`wins` 把 16 位立即数放到 8 个槽位中任意一个，汇编器的 `li` 伪指令自动选出最短序列。
 - **异常**：非法指令、能力错误（tag/边界/权限）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
@@ -64,11 +65,11 @@
 | r44–r62 | — | general |
 | r63 | `rc` | **root capability** at reset |
 
-Each GPR is a *fat register*: `{value[127:0], tag, perm[2:0], base[127:0], top[128:0]}`.
+Each GPR is a *fat register*: `{value[127:0], tag, perm[4:0], base[127:0], top[128:0]}`.
 The side-band is invisible to ordinary instructions. **Invariant:** when `tag = 0` the side-band is all zero.
 
 At reset all registers read as zero and untagged, except `rc` (r63), which holds the root capability:
-`tag=1, perm=RWX(7), base=0, top=2^128, value=0`. PC = 0. All CSRs = 0.
+`tag=1, perm=all (0x1F), base=0, top=2^128, value=0`. PC = 0. All CSRs = 0. Shadow tag memory is all clear.
 
 ## 2. Instruction formats
 
@@ -106,7 +107,9 @@ At reset all registers read as zero and untagged, except `rc` (r63), which holds
 | 0x12 | `csetbndi` (imm is **unsigned** 14-bit length) | I |
 | 0x14 | `wli` (k=0) / `wins` (k=1) | K |
 | 0x18–0x20 | `lb lh lw ld lq lbu lhu lwu ldu` | I |
+| 0x21 | `clc` (capability load, §5.1.1) | I |
 | 0x28–0x2C | `sb sh sw sd sq` | S |
+| 0x2D | `csc` (capability store, §5.1.1) | S |
 | 0x30–0x35 | `beq bne blt bge bltu bgeu` | B |
 | 0x38 | `jal` | J |
 | 0x39 | `jalr` | I |
@@ -170,7 +173,8 @@ Access checks, in priority order (the first failing check raises its trap; `tval
 3. `ea mod size = 0` → *misaligned*
 4. `ea` in RAM or in the MMIO page → otherwise *access-fault*
 
-Loaded values are always untagged; stores write only the 128-bit value (see §9 — no tagged memory in v1).
+Values loaded by these instructions are always untagged. Every successful store to RAM by these instructions
+(any size, including a single byte) **clears the shadow tag** of the 16-byte granule it touches (§5.1.1).
 Untagged base registers perform unchecked ("hybrid mode") accesses.
 
 ### 4.4 Control transfer
@@ -199,15 +203,16 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 ### 5.1 Hardware capabilities (CHERI-inspired fat pointers)
 
 A *capability* is a register whose hidden tag is set. It grants access to `[base, top)` with permissions
-`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC — reserved in v1). Its value is the current address (cursor),
+`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC — reserved, bit3 LOAD_CAP, bit4 STORE_CAP). Its value is the current address (cursor),
 a full 128-bit address — bounds are stored at full precision in the side-band, so no address bits are
 sacrificed to compression, and a cursor may move out of bounds without losing the tag (it simply cannot
 be dereferenced there).
 
 **Unforgeability.** The only instructions that produce a tagged result are `csetaddr`, `cincaddr(i)`,
-`csetbnd(i)` and `candperm`, and only when their `rs1` is already tagged. Every other write — ALU, load,
-`mv` (= `addi`), CSR read, link register — clears the tag. Tags therefore descend only from the root
-capability in `rc` at reset.
+`csetbnd(i)` and `candperm` (only when their `rs1` is already tagged) and `clc` (only from a granule whose
+shadow tag is set, which only `csc` of a tagged register can set). Every other write — ALU, ordinary load,
+`mv` (= `addi`), CSR read, link register — clears the tag, and every ordinary store clears the granule's
+tag. Tags therefore descend only from the root capability in `rc` at reset.
 
 **Monotonicity.** `csetbnd` may only shrink bounds, `candperm` may only remove permissions.
 
@@ -216,7 +221,7 @@ capability in `rc` at reset.
 | 0 | `csetaddr rd, rs1, rs2` | rd = rs1 with cursor := rs2.value (tag/bounds kept) |
 | 1 | `cincaddr rd, rs1, rs2` | rd = rs1 with cursor += rs2.value |
 | 2 | `csetbnd rd, rs1, rs2` | requires rs1 tagged (else *cap-tag*); new = [rs1.cursor, rs1.cursor + rs2) must lie within rs1's bounds (else *cap-bounds*); rd = tagged, same perms, base = cursor = rs1.cursor |
-| 3 | `candperm rd, rs1, rs2` | perm := perm & rs2[2:0] (untagged rs1 → untagged result) |
+| 3 | `candperm rd, rs1, rs2` | perm := perm & rs2[4:0] (untagged rs1 → untagged result) |
 | 4 | `cgetbase rd, rs1` | base (0 if untagged) |
 | 5 | `cgetlen rd, rs1` | top − base, saturated to 2^128−1 |
 | 6 | `cgetperm rd, rs1` | perm |
@@ -235,6 +240,30 @@ csetaddr  s0, rc, t1        # cursor into the root capability
 csetbndi  s0, s0, 64        # s0 may touch exactly buffer[0..63]
 candperm  s1, s0, t4        # (t4 = 1) read-only view
 sq        t2, 64(s0)        # -> capability-bounds trap, precise, tval = buffer+64
+```
+
+### 5.1.1 Tagged memory (v2): `clc` / `csc`
+
+Memory is divided into 16-byte **granules**. Each RAM granule has an architecturally hidden **shadow
+entry** `{tag, perm, base, top}` (the same side-band a fat register carries). Because TACHYON-128 keeps
+full-precision bounds instead of compressing them into the 128-bit word, the shadow entry holds the whole
+metadata, not just the tag bit; ordinary loads cannot read it and ordinary stores cannot write it.
+
+| Instruction | Semantics |
+|---|---|
+| `clc rd, imm(rs1)` | `ea = rs1 + sext(imm14)`; 16-byte access, checks as for `lq` (LOAD perm, bounds, 16-byte alignment, RAM/MMIO). `rd.value` = the 16 bytes; `rd` is **tagged with the granule's shadow metadata** if the granule's tag is set **and** (`rs1` is untagged **or** `rs1` has LOAD_CAP); otherwise `rd` is untagged (the tag is silently stripped, CHERI-style). MMIO reads return 0, untagged. |
+| `csc rA, imm(rs1)` | `ea = rs1 + sext(imm14)`; 16-byte store of `rA.value`. Checks in order: (1) tagged `rs1` lacks STORE → cap-permission; (2) tagged `rs1` lacks STORE_CAP **and** `rA` is tagged → cap-permission; (3) bounds; (4) alignment; (5) RAM/MMIO. In RAM the granule's shadow entry becomes `rA`'s metadata if `rA` is tagged, else it is cleared. Stores to MMIO behave like `sq` (value only). |
+
+* Any successful `sb/sh/sw/sd/sq` to RAM clears the shadow tag of the granule written.
+* Untagged base registers (hybrid mode) may `clc`/`csc` without checks; this cannot forge tags because a
+  granule's tag can only be set by `csc` of a register that is already tagged.
+* Reset: every shadow tag is clear.  The 256 KiB RAM has 16 384 granules.
+
+Example (a linked list of capabilities, `programs/caplist.s`):
+```
+csc   s2, 0(t4)        # node.next = previous head (tag + bounds preserved)
+clc   t0, 0(t0)        # follow next: comes back tagged, with that node's 32-byte bounds
+sq    t6, 96(s0)       # overwrite a link with an integer -> granule tag cleared, list is cut
 ```
 
 ### 5.2 SIMD lanes inside a GPR
@@ -270,7 +299,7 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 | 1 | illegal-instruction | undefined opcode/func, `vmul.d`, CSR number ≥ 5, the zero word (`tval` = instruction word) |
 | 2 | capability-tag | `csetbnd(i)` on an untagged register |
 | 3 | capability-bounds | out-of-bounds access through a capability; non-monotonic `csetbnd(i)` |
-| 4 | capability-permission | load/store through a capability lacking LOAD/STORE |
+| 4 | capability-permission | load/store through a capability lacking LOAD/STORE; `csc` of a tagged value through a capability lacking STORE_CAP |
 | 5 | misaligned | access not naturally aligned |
 | 6 | access-fault | data access outside RAM and MMIO; instruction fetch outside RAM (`tval` = pc) |
 
@@ -301,10 +330,8 @@ label:  op operands      # comment   (';' also starts a comment)
 * Pseudo-ops: `nop li la mv cmove not neg seqz snez j call ret jr beqz bnez bltz bgez bgtz blez bgt ble bgtu bleu`,
   `halt` (no operand = `halt zero`), `jal label` (= `jal ra, label`).
 
-## 9. Known limitations of v1 (deliberate)
+## 9. Known limitations (deliberate)
 
-* No tagged memory: storing a capability writes only its value (the tag is stripped); capabilities cannot be
-  spilled to memory and reloaded. A v2 would add one tag bit per 16-byte granule.
 * No capability-checked instruction fetch (EXEC permission reserved), no sealed capabilities.
 * Single privilege level; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.

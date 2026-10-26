@@ -48,7 +48,7 @@ def run_diff(name, binary, workdir, max_steps=3_000_000, expect=None):
         if err:
             res.msg = "golden expectation failed: " + err
             return res
-    files = {k: f"{base}.rtl.{k}" for k in ("trace", "console", "mem", "stat")}
+    files = {k: f"{base}.rtl.{k}" for k in ("trace", "console", "mem", "stat", "tags")}
     cmd = [VTB, f"+prog={hexf}", f"+max={m.retired * 40 + 10000}"] + [f"+{k}={v}" for k, v in files.items()]
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
@@ -74,6 +74,10 @@ def run_diff(name, binary, workdir, max_steps=3_000_000, expect=None):
     if rmem != bytes(m.ram):
         diff = next(i for i in range(RAM_BYTES) if rmem[i] != m.ram[i])
         res.msg = f"RAM differs first at 0x{diff:x}"
+        return res
+    rtags = open(files["tags"]).read().splitlines()
+    if rtags != m.tagdump():
+        res.msg = f"shadow tag memory differs: golden {m.tagdump()[:4]} rtl {rtags[:4]}"
         return res
     if m.retired != res.retired:
         res.msg = f"retired count differs golden {m.retired} rtl {res.retired}"

@@ -22,6 +22,9 @@ module tx_core #(
   output logic      [15:0]  dmem_be,
   output logic      [127:0] dmem_wdata,
   input  wire logic [127:0] dmem_rdata,
+  // shadow tag memory (one tag + capability metadata per 16-byte granule), same address/strobe
+  output logic      [MW-1:0] dmem_wmeta,   // written on every RAM store: 0 for data stores, cap for csc
+  input  wire logic [MW-1:0] dmem_rmeta,
   // status
   output logic              halted,
   output logic      [31:0]  exit_code,
@@ -56,8 +59,8 @@ module tx_core #(
       OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI: k[K_ALUI] = 1;
       OP_CINCADDRI, OP_CSETBNDI: k[K_CAPI] = 1;
       OP_WIDE:   k[K_WIDE] = 1;
-      OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU: k[K_LOAD] = 1;
-      OP_SB, OP_SH, OP_SW, OP_SD, OP_SQ: k[K_STORE] = 1;
+      OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU, OP_CLC: k[K_LOAD] = 1;
+      OP_SB, OP_SH, OP_SW, OP_SD, OP_SQ, OP_CSC: k[K_STORE] = 1;
       OP_BEQ, OP_BNE, OP_BLT, OP_BGE, OP_BLTU, OP_BGEU: k[K_BR] = 1;
       OP_JAL:    k[K_JAL] = 1;
       OP_JALR:   k[K_JALR] = 1;
@@ -91,7 +94,8 @@ module tx_core #(
   logic [5:0]   idex_rs1, idex_rs2, idex_rd;
   // EX/MEM
   logic         exmem_valid, exmem_we, exmem_load, exmem_store, exmem_trap, exmem_csrr,
-                exmem_csrw, exmem_eret, exmem_halt, exmem_mmio;
+                exmem_csrw, exmem_eret, exmem_halt, exmem_mmio, exmem_clc, exmem_csc, exmem_ldcap;
+  logic [MW-1:0] exmem_smeta;
   logic [127:0] exmem_pc, exmem_val, exmem_ea, exmem_sdata, exmem_tval;
   logic [MW-1:0] exmem_meta;
   logic [5:0]   exmem_rd, exmem_op;
@@ -162,7 +166,7 @@ module tx_core #(
   wire [127:0] id_target = id_k[K_JAL] ? ifid_pc + (id_imm20 << 2) : ifid_pc + (id_imm14 << 2);
 
   // load-use / csrr-use interlock
-  wire ex_is_late = idex_valid & idex_we & ((idex_inst[5:0] >= OP_LB && idex_inst[5:0] <= OP_LDU) ||
+  wire ex_is_late = idex_valid & idex_we & ((idex_inst[5:0] >= OP_LB && idex_inst[5:0] <= OP_CLC) ||
                     idex_inst[5:0] == OP_CSRR);
   wire stall_lu = ifid_valid & ex_is_late &
                   ((id_use1 & id_rs1 == idex_rd) | (id_use2 & id_rs2 == idex_rd));
@@ -187,8 +191,9 @@ module tx_core #(
     if (mem_fwd_ok && exmem_rd == idex_rs2) begin b = exmem_val; mb = exmem_meta; end
     else if (memwb_valid && memwb_we && memwb_rd == idex_rs2) begin b = memwb_val; mb = memwb_meta; end
   end
-  wire         a_tag  = ma[260];
-  wire [2:0]   a_perm = ma[259:257];
+  wire         a_tag  = ma[M_TAG];
+  wire [PW-1:0] a_perm = ma[M_PERM +: PW];
+  wire         b_tag  = mb[M_TAG];
   wire [127:0] a_base = ma[256:129];
   wire [128:0] a_top  = ma[128:0];
 
@@ -248,11 +253,11 @@ module tx_core #(
       end
       4'd3: begin                                                    // candperm
         cap_y = a;
-        cap_m = a_tag ? {1'b1, a_perm & cap_x[2:0], a_base, a_top} : '0;
+        cap_m = a_tag ? {1'b1, a_perm & cap_x[PW-1:0], a_base, a_top} : '0;
       end
       4'd4: cap_y = a_base;                                          // cgetbase
       4'd5: cap_y = cap_len[128] ? {128{1'b1}} : cap_len[127:0];     // cgetlen
-      4'd6: cap_y = {125'd0, a_perm};                                // cgetperm
+      4'd6: cap_y = {{(128-PW){1'b0}}, a_perm};                                // cgetperm
       4'd7: cap_y = {127'd0, a_tag};                                 // cgettag
       default: cap_y = a;                                            // cclrtag
     endcase
@@ -277,6 +282,8 @@ module tx_core #(
   wire         is_mem   = ex_k[K_LOAD] | ex_k[K_STORE];
   wire [128:0] ea_end   = {1'b0, ea} + {124'd0, msize};
   wire         need_p   = ex_k[K_STORE] ? a_perm[1] : a_perm[0];
+  wire         is_csc   = ex_op == OP_CSC;
+  wire         is_clc   = ex_op == OP_CLC;
   wire [3:0]   amask    = msize[3:0] - 4'd1;           // 16 -> 4'hF
   wire         misalign = |(ea[3:0] & amask);
   wire         in_ram   = ~|ea[127:RB];
@@ -286,6 +293,7 @@ module tx_core #(
   always_comb begin
     mem_fault = 1'b1;
     if (a_tag && !need_p) mem_cause = C_CAP_PERM;
+    else if (a_tag && is_csc && b_tag && !a_perm[4]) mem_cause = C_CAP_PERM;   // STORE_CAP
     else if (a_tag && (ea < a_base || ea_end > a_top)) mem_cause = C_CAP_BOUNDS;
     else if (misalign) mem_cause = C_ALIGN;
     else if (!in_ram && !in_mmio) mem_cause = C_ACCESS;
@@ -347,6 +355,7 @@ module tx_core #(
   assign dmem_we    = mem_v & exmem_store & ~exmem_trap & ~halted_q;
   assign dmem_be    = be_raw << exmem_ea[3:0];
   assign dmem_wdata = exmem_sdata << mshift;
+  assign dmem_wmeta = exmem_csc ? exmem_smeta : '0;
 
   wire [127:0] ld_raw = exmem_mmio ? '0 : (dmem_rdata >> mshift);
   logic [127:0] ld_val;
@@ -434,6 +443,10 @@ module tx_core #(
         exmem_ea    <= ea;
         exmem_mmio  <= in_mmio;
         exmem_sdata <= b;
+        exmem_smeta <= mb;
+        exmem_clc   <= is_clc;
+        exmem_csc   <= is_csc;
+        exmem_ldcap <= ~a_tag | a_perm[3];               // LOAD_CAP (or unchecked base)
         exmem_trap  <= ex_trap;
         exmem_cause <= ex_cause;
         exmem_tval  <= ex_tval;
@@ -469,7 +482,8 @@ module tx_core #(
       memwb_rd    <= exmem_rd;
       memwb_we    <= exmem_we & ~exmem_trap;
       memwb_val   <= exmem_load ? ld_val : (exmem_csrr ? csr_rd : exmem_val);
-      memwb_meta  <= (exmem_load | exmem_csrr) ? '0 : exmem_meta;
+      memwb_meta  <= exmem_load ? ((exmem_clc & ~exmem_mmio & exmem_ldcap & dmem_rmeta[M_TAG]) ? dmem_rmeta : '0)
+                                : (exmem_csrr ? '0 : exmem_meta);
       memwb_trap  <= exmem_trap;
       memwb_cause <= exmem_cause;
       memwb_tval  <= exmem_tval;

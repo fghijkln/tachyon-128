@@ -11,7 +11,8 @@ module tb (
   localparam int RB = $clog2(RAM_BYTES);
 
   logic [127:0] ram [0:RAMW-1];
-  string prog, tracef, conf, memf, statf;
+  logic [MW-1:0] tmeta [0:RAMW-1];      // shadow tag memory: tag + capability metadata per granule
+  string prog, tracef, conf, memf, statf, tagf;
   integer ftr, fcon;
   longint unsigned cycles, retired;
 
@@ -21,7 +22,8 @@ module tb (
     if (!$value$plusargs("console=%s", conf)) conf = "rtl.console";
     if (!$value$plusargs("mem=%s", memf)) memf = "rtl.mem";
     if (!$value$plusargs("stat=%s", statf)) statf = "rtl.stat";
-    for (int i = 0; i < RAMW; i++) ram[i] = '0;
+    if (!$value$plusargs("tags=%s", tagf)) tagf = "rtl.tags";
+    for (int i = 0; i < RAMW; i++) begin ram[i] = '0; tmeta[i] = '0; end
     $readmemh(prog, ram);
     ftr = $fopen(tracef, "w");
     fcon = $fopen(conf, "wb");
@@ -29,6 +31,7 @@ module tb (
   end
 
   logic [127:0] imem_addr, dmem_addr, dmem_wdata, dmem_rdata;
+  logic [MW-1:0] dmem_wmeta, dmem_rmeta;
   logic [31:0] imem_rdata, exit_code;
   logic dmem_re, dmem_we, halted;
   logic [15:0] dmem_be;
@@ -45,6 +48,7 @@ module tb (
   assign imem_rdata = i_in ? iword[imem_addr[3:2]*32 +: 32] : 32'd0;
   wire d_in = ~|dmem_addr[127:RB];
   assign dmem_rdata = d_in ? ram[dmem_addr[RB-1:4]] : '0;
+  assign dmem_rmeta = d_in ? tmeta[dmem_addr[RB-1:4]] : '0;
 
   logic [127:0] bemask;
   always_comb for (int i = 0; i < 16; i++) bemask[i*8 +: 8] = {8{dmem_be[i]}};
@@ -53,7 +57,10 @@ module tb (
     if (!rst && !done) begin
       cycles <= cycles + 1;
       if (dmem_we) begin
-        if (d_in) ram[dmem_addr[RB-1:4]] <= (ram[dmem_addr[RB-1:4]] & ~bemask) | (dmem_wdata & bemask);
+        if (d_in) begin
+          ram[dmem_addr[RB-1:4]] <= (ram[dmem_addr[RB-1:4]] & ~bemask) | (dmem_wdata & bemask);
+          tmeta[dmem_addr[RB-1:4]] <= dmem_wmeta;
+        end
         else if (dmem_addr == {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0000})
           $fwrite(fcon, "%c", dmem_wdata[7:0]);
         else if (dmem_addr == {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0020})
@@ -64,8 +71,8 @@ module tb (
         else begin
           retired <= retired + 1;
           if (tr_we) begin
-            if (tr_meta[260]) $fwrite(ftr, "%0h %0d %0h 1 %0d %0h %0h\n", tr_pc, tr_rd, tr_val,
-                                      tr_meta[259:257], tr_meta[256:129], tr_meta[128:0]);
+            if (tr_meta[M_TAG]) $fwrite(ftr, "%0h %0d %0h 1 %0d %0h %0h\n", tr_pc, tr_rd, tr_val,
+                                      tr_meta[M_PERM +: PW], tr_meta[256:129], tr_meta[128:0]);
             else $fwrite(ftr, "%0h %0d %0h 0\n", tr_pc, tr_rd, tr_val);
           end else $fwrite(ftr, "%0h 0 0 0\n", tr_pc);
         end
@@ -78,6 +85,10 @@ module tb (
     integer fm, fs;
     fm = $fopen(memf, "w");
     for (int i = 0; i < RAMW; i++) $fwrite(fm, "%032h\n", ram[i]);
+    $fclose(fm);
+    fm = $fopen(tagf, "w");
+    for (int i = 0; i < RAMW; i++)
+      if (tmeta[i][M_TAG]) $fwrite(fm, "%0h %0d %0h %0h\n", i, tmeta[i][M_PERM +: PW], tmeta[i][256:129], tmeta[i][128:0]);
     $fclose(fm);
     fs = $fopen(statf, "w");
     $fwrite(fs, "cycles %0d\nretired %0d\nexit %0d\n", cycles, retired, exit_code);

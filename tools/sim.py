@@ -106,6 +106,7 @@ class Machine:
         self.val[63], self.tag[63], self.meta[63] = 0, 1, (PERM_ALL, 0, TOP_MAX)
         self.pc = 0
         self.csr = [0] * NUM_CSRS
+        self.mtag = {}              # shadow tag memory: granule index -> (perm, base, top) when tagged
         self.console = bytearray()
         self.trace = []
         self.retired = 0
@@ -122,11 +123,13 @@ class Machine:
         return rd
 
     # ---------------------------------------------------------------- memory
-    def check_access(self, rs1, ea, size, is_store):
+    def check_access(self, rs1, ea, size, is_store, store_cap=False):
         if self.tag[rs1]:
             perm, base, top = self.meta[rs1]
             need = PERM_STORE if is_store else PERM_LOAD
             if not perm & need:
+                raise Trap(CAUSE_CAP_PERM, ea)
+            if store_cap and not perm & PERM_STORE_CAP:
                 raise Trap(CAUSE_CAP_PERM, ea)
             if ea < base or ea + size > top:
                 raise Trap(CAUSE_CAP_BOUNDS, ea)
@@ -157,6 +160,30 @@ class Machine:
                 raise Halt(v & 0xFFFFFFFF)
             return
         self.ram[ea:ea + size] = v.to_bytes(size, "little")
+        self.mtag.pop(ea // GRANULE, None)     # any data store clears the granule's tag
+
+    def load_cap(self, rs1, ea):
+        """clc: 128-bit value + tag/metadata from the shadow memory. Returns (value, tag, meta)."""
+        kind = self.check_access(rs1, ea, 16, False)
+        if kind == "mmio":
+            return 0, 0, (0, 0, 0)
+        v = int.from_bytes(self.ram[ea:ea + 16], "little")
+        g = ea // GRANULE
+        if g in self.mtag and (not self.tag[rs1] or self.meta[rs1][0] & PERM_LOAD_CAP):
+            return v, 1, self.mtag[g]
+        return v, 0, (0, 0, 0)
+
+    def store_cap(self, rs1, ea, A):
+        """csc: store register A's value and (if tagged) its capability metadata."""
+        kind = self.check_access(rs1, ea, 16, True, store_cap=bool(self.tag[A]))
+        if kind == "mmio":
+            self.store(rs1, ea, 16, self.val[A])
+            return
+        self.ram[ea:ea + 16] = self.val[A].to_bytes(16, "little")
+        if self.tag[A]:
+            self.mtag[ea // GRANULE] = self.meta[A]
+        else:
+            self.mtag.pop(ea // GRANULE, None)
 
     # ---------------------------------------------------------------- one instruction
     def step(self):
@@ -245,6 +272,12 @@ class Machine:
             _, size, signed = [v for v in LOAD_OPS.values() if v[0] == op][0]
             ea = (x1 + f["imm14"]) & MASK
             wrote = self.rd_write(rd, self.load(rs1, ea, size, signed))
+        elif op == OP_CLC:
+            ea = (x1 + f["imm14"]) & MASK
+            v, t, m = self.load_cap(rs1, ea)
+            wrote = self.rd_write(rd, v, t, m)
+        elif op == OP_CSC:
+            self.store_cap(rs1, (x1 + f["imm14"]) & MASK, A)
         elif OP_SB <= op <= OP_SQ:
             size = [v[1] for v in STORE_OPS.values() if v[0] == op][0]
             ea = (x1 + f["imm14"]) & MASK
@@ -292,7 +325,7 @@ class Machine:
                 raise Trap(CAUSE_CAP_BOUNDS, a)
             return self.rd_write(rd, a, 1, (perm, a, ntop))
         if fn == "candperm":
-            return self.rd_write(rd, a, t, (perm & x2 & 7, base, top))
+            return self.rd_write(rd, a, t, (perm & x2 & PERM_ALL, base, top))
         if fn == "cgetbase":
             return self.rd_write(rd, base)
         if fn == "cgetlen":
@@ -341,6 +374,10 @@ class Machine:
         if self.halted is None:
             self.halted = ("timeout", 0)
         return self
+
+    def tagdump(self):
+        """Shadow tag memory as text lines 'granule perm base top' (tagged granules only, ascending)."""
+        return [f"{g:x} {p} {b:x} {t:x}" for g, (p, b, t) in sorted(self.mtag.items())]
 
     def regdump(self):
         out = []

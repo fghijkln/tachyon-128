@@ -28,7 +28,9 @@ OP_CSETBNDI = 0x12
 OP_WIDE = 0x14     # K-type wide immediate: wli / wins
 
 OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU = range(0x18, 0x21)
+OP_CLC = 0x21      # clc rd, imm(rs1): 128-bit capability load (tag + metadata from shadow memory)
 OP_SB, OP_SH, OP_SW, OP_SD, OP_SQ = range(0x28, 0x2D)
+OP_CSC = 0x2D      # csc rA, imm(rs1): 128-bit capability store (tag + metadata to shadow memory)
 OP_BEQ, OP_BNE, OP_BLT, OP_BGE, OP_BLTU, OP_BGEU = range(0x30, 0x36)
 OP_JAL = 0x38
 OP_JALR = 0x39
@@ -59,6 +61,8 @@ LOAD_OPS = {"lb": (OP_LB, 1, True), "lh": (OP_LH, 2, True), "lw": (OP_LW, 4, Tru
             "ld": (OP_LD, 8, True), "lq": (OP_LQ, 16, False), "lbu": (OP_LBU, 1, False),
             "lhu": (OP_LHU, 2, False), "lwu": (OP_LWU, 4, False), "ldu": (OP_LDU, 8, False)}
 STORE_OPS = {"sb": (OP_SB, 1), "sh": (OP_SH, 2), "sw": (OP_SW, 4), "sd": (OP_SD, 8), "sq": (OP_SQ, 16)}
+CAP_LOAD_OPS = {"clc": OP_CLC}
+CAP_STORE_OPS = {"csc": OP_CSC}
 BRANCH_OPS = {"beq": OP_BEQ, "bne": OP_BNE, "blt": OP_BLT, "bge": OP_BGE, "bltu": OP_BLTU, "bgeu": OP_BGEU}
 
 # ---------------------------------------------------------------- CSRs
@@ -76,8 +80,9 @@ CAUSE_NAMES = {1: "illegal-instruction", 2: "capability-tag", 3: "capability-bou
                4: "capability-permission", 5: "misaligned", 6: "access-fault"}
 
 # capability permissions
-PERM_LOAD, PERM_STORE, PERM_EXEC = 1, 2, 4
-PERM_ALL = 7
+PERM_LOAD, PERM_STORE, PERM_EXEC, PERM_LOAD_CAP, PERM_STORE_CAP = 1, 2, 4, 8, 16
+PERM_ALL = 0x1F
+GRANULE = 16                 # tagged-memory granule (bytes): one shadow tag + metadata per granule
 
 # ---------------------------------------------------------------- registers
 NREGS = 64

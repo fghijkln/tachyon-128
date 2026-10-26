@@ -202,14 +202,16 @@ class Assembler:
             else:
                 imm14(v)
             return [enc_i(I_OPS[mn], R(ops[0]), R(ops[1]), v)]
-        if mn in LOAD_OPS:
+        if mn in LOAD_OPS or mn in CAP_LOAD_OPS:
             need(2)
             off, base = self.mem_operand(ops[1], final)
-            return [enc_i(LOAD_OPS[mn][0], R(ops[0]), base, imm14(off))]
-        if mn in STORE_OPS:
+            op = LOAD_OPS[mn][0] if mn in LOAD_OPS else CAP_LOAD_OPS[mn]
+            return [enc_i(op, R(ops[0]), base, imm14(off))]
+        if mn in STORE_OPS or mn in CAP_STORE_OPS:
             need(2)
             off, base = self.mem_operand(ops[1], final)
-            return [enc_i(STORE_OPS[mn][0], R(ops[0]), base, imm14(off))]
+            op = STORE_OPS[mn][0] if mn in STORE_OPS else CAP_STORE_OPS[mn]
+            return [enc_i(op, R(ops[0]), base, imm14(off))]
         if mn in BRANCH_OPS:
             need(3)
             # enc: field A = rs2, rs1 field = rs1

@@ -4,8 +4,8 @@ localparam logic [5:0] OP_ADDI = 6'h08, OP_ANDI = 6'h09, OP_ORI = 6'h0A, OP_XORI
                        OP_SLTI = 6'h0C, OP_SLTIU = 6'h0D, OP_SLLI = 6'h0E, OP_SRLI = 6'h0F,
                        OP_SRAI = 6'h10, OP_CINCADDRI = 6'h11, OP_CSETBNDI = 6'h12, OP_WIDE = 6'h14;
 localparam logic [5:0] OP_LB = 6'h18, OP_LH = 6'h19, OP_LW = 6'h1A, OP_LD = 6'h1B, OP_LQ = 6'h1C,
-                       OP_LBU = 6'h1D, OP_LHU = 6'h1E, OP_LWU = 6'h1F, OP_LDU = 6'h20;
-localparam logic [5:0] OP_SB = 6'h28, OP_SH = 6'h29, OP_SW = 6'h2A, OP_SD = 6'h2B, OP_SQ = 6'h2C;
+                       OP_LBU = 6'h1D, OP_LHU = 6'h1E, OP_LWU = 6'h1F, OP_LDU = 6'h20, OP_CLC = 6'h21;
+localparam logic [5:0] OP_SB = 6'h28, OP_SH = 6'h29, OP_SW = 6'h2A, OP_SD = 6'h2B, OP_SQ = 6'h2C, OP_CSC = 6'h2D;
 localparam logic [5:0] OP_BEQ = 6'h30, OP_BNE = 6'h31, OP_BLT = 6'h32, OP_BGE = 6'h33,
                        OP_BLTU = 6'h34, OP_BGEU = 6'h35;
 localparam logic [5:0] OP_JAL = 6'h38, OP_JALR = 6'h39, OP_HALT = 6'h3C, OP_CSRR = 6'h3D,
@@ -28,6 +28,11 @@ localparam logic [3:0] C_ILLEGAL = 1, C_CAP_TAG = 2, C_CAP_BOUNDS = 3, C_CAP_PER
 // MMIO
 localparam logic [127:0] MMIO_EXIT = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0010};
 
-// metadata packing: {tag, perm[2:0], base[127:0], top[128:0]}  = 261 bits
-localparam int MW = 261;
-localparam logic [MW-1:0] ROOT_META = {1'b1, 3'b111, 128'd0, 1'b1, 128'd0};
+// metadata packing: {tag, perm[PW-1:0], base[127:0], top[128:0]}
+//   perm bits: 0 LOAD, 1 STORE, 2 EXEC, 3 LOAD_CAP, 4 STORE_CAP
+localparam int PW = 5;
+localparam int MW = 1 + PW + 128 + 129;
+localparam int M_TAG = MW - 1;          // tag bit
+localparam int M_PERM = 257;            // perm  = meta[M_PERM +: PW]
+localparam logic [PW-1:0] PERM_ALL = 5'h1F;
+localparam logic [MW-1:0] ROOT_META = {1'b1, PERM_ALL, 128'd0, 1'b1, 128'd0};

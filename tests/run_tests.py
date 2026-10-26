@@ -17,6 +17,7 @@ from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import ROOT, assemble_path, assemble_src, run_diff  # noqa: E402
 
+PROGRAMS = ["fib", "fact", "sort", "simd", "capfault", "caplist"]
 WORK = os.environ.get("TX_WORK", os.path.join(ROOT, "build", "work"))
 
 
@@ -64,6 +65,14 @@ def expect_program(name):
             if out.count("!! trap cause=") != 3 or "faults caught = 3" not in out \
                     or "tag after mv (forge attempt) = 0" not in out:
                 return "capfault behaviour wrong"
+        if name == "caplist":
+            v = 0x1000000000000000000000001
+            if "nodes walked        = 6\n" not in out or f"payload sum         = {21 * v:032x}" not in out \
+                    or "nodes after forge   = 3\n" not in out or f"{15 * v:032x}" not in out \
+                    or "nodes via read-only = 3\n" not in out or "faults caught = 3\n" not in out \
+                    or [l for l in out.splitlines() if "trap cause" in l] != \
+                    ["  !! trap cause=2", "  !! trap cause=3", "  !! trap cause=4"]:
+                return "caplist behaviour wrong"
         return None
     return chk
 
@@ -118,7 +127,7 @@ def main():
         save("unit", res)
         rc |= any(not r.ok for r in res)
     if what in ("programs", "all"):
-        progs = ["fib", "fact", "sort", "simd", "capfault"]
+        progs = PROGRAMS
         res = run([("prog", p, os.path.join(ROOT, "programs", p + ".s"), 0) for p in progs], "programs")
         for r in res:
             print(f"   {r.name:9s} cycles={r.cycles:7d} retired={r.retired:6d} CPI={r.cpi:.3f}")
