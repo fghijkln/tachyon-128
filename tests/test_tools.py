@@ -33,6 +33,13 @@ def check_defs():
     assert int(counts["N_CSR"]) == isa.NUM_CSRS
     for name, val in re.findall(r"C_(\w+)\s*=\s*(\d+)", sv):
         assert getattr(isa, "CAUSE_" + name) == int(val), name
+    cf = re.findall(r"CF_(\w+)\s*=\s*4'd(\d+)", sv)
+    for name, val in cf:
+        assert isa.CAP_FUNCS[int(val)] == name.lower(), name
+    for name in ("MTIME", "MTIMECMP", "EXIT"):
+        m = re.search(r"MMIO_%s = \{112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h([0-9A-F]+)\}" % name, sv)
+        assert getattr(isa, "MMIO_" + name) == isa.MMIO_BASE + int(m.group(1), 16), name
+    n += len(cf) + 3
     alu = re.findall(r"A_(\w+)\s*=\s*(\d+)", sv)
     for name, val in alu:
         assert isa.ALU_FUNCS[int(val)] == name.lower(), name

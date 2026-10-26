@@ -555,11 +555,21 @@ out:    eret
 body:   .word 0                  # illegal inside the restricted region
         cgetpcc r20              # eret restored the restricted PCC
         cgetlen r21, r20
+        j bout                   # leaves the 32-byte region: the restored fetch PCC must trap
+        nop
+        nop
+        nop
+        nop
+bout:   addi r22, r22, 1         # (skipped: fetch cap-bounds fault, then resumes under root)
+        addi r23, r23, 1
         cjalr r0, r1
 h2:     addi r53, r53, 1
         cgetpcc r54
         csrr r51, epc
-        addi r51, r51, 4
+        csrr r52, tval
+        bne r51, r52, h2n
+        csetepcc rc              # fetch fault: continue under the root PCC
+h2n:    addi r51, r51, 4
         csrw epc, r51
         eret
 """
@@ -656,6 +666,7 @@ ihandler:
 isirq:  csrr r51, epc            # interrupt: resume at epc itself
         csrr r48, status         # IE = 0, PIE = 1 inside the handler
         addi r47, r47, 1
+        lq r45, 0(r5)            # observe memory written by the mainline
         li r52, -0x10000
         lq r46, 0x30(r52)        # mtime
         addi r46, r46, IDELTA
@@ -678,11 +689,12 @@ isirq:  csrr r51, epc            # interrupt: resume at epc itself
         li r20, 40
 iloop:  addi r21, r21, 3
         add r22, r22, r21
+        sq r22, 0(r5)            # an interrupted store must not happen before the handler runs
         addi r20, r20, -1
         bnez r20, iloop
         csrw status, r0          # disable
         li r23, 99
-""", 15, 9)
+""", 15, 8)                     # 4 mainline instructions per tick: the tick walks over every loop slot
     T["irq_mixed"] = irq("""
         li r20, 12
 mloop:  ld r10, 0(r5)            # loads, load-use
@@ -744,7 +756,7 @@ eloop:  addi r20, r20, -1        # mtime passes mtimecmp while disabled
         csrr r23, status
         csrw status, r0
         csrr r24, status
-""", 10, 1000)
+""", 25, 1000)
     T["irq_mmio_regs"] = irq("""
         csrw status, r0
         lq r20, 0x30(r52)        # mtime = retired count

@@ -1,33 +1,27 @@
 {
  "unit": {
-  "passed": 133,
-  "total": 133,
-  "cycles": 15191,
-  "retired": 9185
- },
- "random": {
-  "passed": 2000,
-  "total": 2000,
-  "cycles": 2069764,
-  "retired": 1090156
+  "passed": 150,
+  "total": 150,
+  "cycles": 25111,
+  "retired": 15028
  },
  "programs": {
-  "passed": 5,
-  "total": 5,
-  "cycles": 36930,
-  "retired": 12867,
+  "passed": 7,
+  "total": 7,
+  "cycles": 33113,
+  "retired": 20228,
   "per_test": {
    "fib": {
     "ok": true,
-    "cycles": 14681,
+    "cycles": 9837,
     "retired": 6476,
-    "cpi": 2.267
+    "cpi": 1.519
    },
    "fact": {
     "ok": true,
-    "cycles": 16498,
+    "cycles": 8030,
     "retired": 2838,
-    "cpi": 5.813
+    "cpi": 2.829
    },
    "sort": {
     "ok": true,
@@ -43,10 +37,28 @@
    },
    "capfault": {
     "ok": true,
-    "cycles": 1574,
+    "cycles": 1558,
     "retired": 1073,
-    "cpi": 1.467
+    "cpi": 1.452
+   },
+   "caplist": {
+    "ok": true,
+    "cycles": 2181,
+    "retired": 1537,
+    "cpi": 1.419
+   },
+   "timer": {
+    "ok": true,
+    "cycles": 7330,
+    "retired": 5824,
+    "cpi": 1.259
    }
   }
+ },
+ "random": {
+  "passed": 2000,
+  "total": 2000,
+  "cycles": 3065584,
+  "retired": 1687421
  }
 }
