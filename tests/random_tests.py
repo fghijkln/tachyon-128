@@ -61,8 +61,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2])[0]
         if not allow_ctrl and k in ("br", "loop", "jal", "cjalr"):
             k = "alu"
         if k == "alu":
@@ -92,6 +92,18 @@ class Gen:
                            "divu": "remu", "remu": "divu"}[f]
                 if d not in (a, b):
                     self.emit(f"{partner} r{self.dst()}, r{a}, r{b}")
+        elif k == "divw":           # divider early termination: operands of chosen significant widths
+            wa, wb = r.randint(0, 128), r.randint(1, 128)
+            a = r.getrandbits(wa) | (1 << (wa - 1) if wa else 0)
+            b = r.getrandbits(wb) | (1 << (wb - 1))
+            if r.random() < 0.3:
+                a = (-a) & M
+            ra, rb = self.dst(), self.dst()
+            if ra == rb or 0 in (ra, rb):
+                return
+            self.emit(f"li r{ra}, {a}")
+            self.emit(f"li r{rb}, {b}")
+            self.emit(f"{r.choice(['div', 'divu', 'rem', 'remu'])} r{self.dst()}, r{ra}, r{rb}")
         elif k == "cap":
             f = r.choice([c for c in CAP_FUNCS if c != "cjalr"] + ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal"])
             s1 = r.choice([60, 63, self.src(), self.src()])

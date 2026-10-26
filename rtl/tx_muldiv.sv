@@ -1,12 +1,22 @@
 // TACHYON-128 iterative multiply/divide unit.
 //  * MUL/MULHU: radix-16 shift-add, 32 iterations, full 256-bit product.
-//  * DIV/DIVU/REM/REMU: radix-2 restoring on magnitudes, skipping the dividend's leading
-//    zeros (latency = 1 + significant bits of |dividend|).  Divide-by-zero is instant.
+//  * DIV/DIVU/REM/REMU: radix-4 restoring on magnitudes (2 quotient bits per cycle: the three
+//    candidates 4R+d-B, 4R+d-2B, 4R+d-3B are compared in parallel) with operand-normalised early
+//    termination: only n = sig(|a|) - sig(|b|) + 1 quotient bits are produced (rounded up to even),
+//    the remainder register is preloaded with the top bits of |a| that cannot yet produce a 1.
+//    Latency = ceil(n/2) + 2 cycles (n = 0 when |a| has fewer significant bits than |b|).
+//    Divide-by-zero is instant.
 //  * Result cache: the last product (lo,hi) or quotient/remainder pair is kept with its
 //    operands, so MULHU after MUL, or REMU after DIVU, on the same operands takes 0 extra cycles.
 // op: 0 MUL, 1 MULHU, 2 DIV, 3 DIVU, 4 REM, 5 REMU
 `default_nettype none
-module tx_muldiv (
+module tx_muldiv #(
+`ifdef TX_DIV_STEPS
+  parameter int DIV_STEPS = `TX_DIV_STEPS
+`else
+  parameter int DIV_STEPS = 2      // radix-4 steps per cycle: 1 = radix-4 (2 b/cycle), 2 = 4 b/cycle
+`endif
+) (
   input  wire logic         clk,
   input  wire logic         rst,
   input  wire logic         req,     // EX holds a valid mul/div instruction
@@ -37,8 +47,9 @@ module tx_muldiv (
   // ---------------------------------------------------------------- datapath registers
   logic [255:0] acc;               // mul: {H,L}
   logic [127:0] mA;                // mul multiplicand
-  logic [128:0] R;                 // div remainder
+  logic [127:0] R;                 // div partial remainder (always < divisor)
   logic [127:0] Q, Bd;             // div quotient/dividend shift reg, divisor
+  logic [129:0] Bd3;               // 3 x divisor
   logic         qneg, rneg, lmul;
   logic [7:0]   cnt;
   logic [1:0]   l_kind;
@@ -49,18 +60,46 @@ module tx_muldiv (
   wire sb = is_sdiv & b[127];
   wire [127:0] magA = sa ? -a : a;
   wire [127:0] magB = sb ? -b : b;
-  logic [7:0] lz;
+  logic [7:0] lz, lzb;
   always_comb begin
-    lz = 8'd128;
-    for (int i = 0; i < 128; i++) if (magA[i]) lz = 8'd127 - i[7:0];
+    lz = 8'd128; lzb = 8'd128;
+    for (int i = 0; i < 128; i++) begin
+      if (magA[i]) lz  = 8'd127 - i[7:0];
+      if (magB[i]) lzb = 8'd127 - i[7:0];
+    end
   end
+  // quotient bits needed: n = sigA - sigB + 1 = lzb - lz + 1 (0 if negative), rounded up to a
+  // multiple of the bits retired per cycle (2*DIV_STEPS); never exceeds 128
+  localparam int BPC = 2 * DIV_STEPS;
+  wire [8:0] qn_raw = (lz > lzb) ? 9'd0 : ({1'b0, lzb} - {1'b0, lz} + 9'd1);
+  wire [8:0] qn_up  = qn_raw + 9'(BPC - 1);
+  wire [7:0] qn     = qn_up[7:0] & ~8'(BPC - 1);
 
   // one multiply step
   wire [131:0] mstep = {4'd0, acc[255:128]} + mA * acc[3:0];
-  // one divide step
-  wire [128:0] r_sh = {R[127:0], Q[127]};
-  wire [129:0] r_df = {1'b0, r_sh} - {2'b0, Bd};
-  wire         r_ge = !r_df[129];
+  // radix-4 divide step: r4 = 4R + next two dividend bits (< 4B); candidates compared in parallel
+  function automatic logic [129:0] r4step(input logic [127:0] r, input logic [1:0] nb,
+                                          input logic [127:0] bd, input logic [129:0] bd3);
+    logic [130:0] r4, d1, d2, d3;
+    r4 = {1'b0, r, nb};
+    d1 = r4 - {3'd0, bd};
+    d2 = r4 - {2'd0, bd, 1'b0};
+    d3 = r4 - {1'd0, bd3};
+    if (!d3[130])      r4step = {2'd3, d3[127:0]};
+    else if (!d2[130]) r4step = {2'd2, d2[127:0]};
+    else if (!d1[130]) r4step = {2'd1, d1[127:0]};
+    else               r4step = {2'd0, r4[127:0]};
+  endfunction
+  logic [127:0] r_nx, q_nx;
+  always_comb begin
+    logic [129:0] st1;
+    r_nx = R; q_nx = Q;
+    for (int k = 0; k < DIV_STEPS; k++) begin
+      st1  = r4step(r_nx, q_nx[127:126], Bd, Bd3);
+      r_nx = st1[127:0];
+      q_nx = {q_nx[125:0], st1[129:128]};
+    end
+  end
 
   wire start = req && !abort && (st == IDLE) && !hit && !dz;
 
@@ -101,9 +140,10 @@ module tx_muldiv (
             qneg <= sa ^ sb;
             rneg <= sa;
             Bd   <= magB;
-            R    <= '0;
-            Q    <= magA << lz;
-            cnt  <= 8'd128 - lz;
+            Bd3  <= {2'd0, magB} + {1'd0, magB, 1'b0};
+            R    <= magA >> qn;
+            Q    <= magA << (8'd128 - qn);
+            cnt  <= qn / 8'(BPC);
             st   <= RUN;
           end
         end
@@ -115,15 +155,15 @@ module tx_muldiv (
               c_hi <= acc[255:128];
             end else begin
               c_lo <= qneg ? -Q : Q;
-              c_hi <= rneg ? -R[127:0] : R[127:0];
+              c_hi <= rneg ? -R : R;
             end
             st <= DONE;
           end else begin
             cnt <= cnt - 8'd1;
             if (lmul) acc <= {mstep, acc[127:4]};
             else begin
-              R <= r_ge ? r_df[128:0] : r_sh;
-              Q <= {Q[126:0], r_ge};
+              R <= r_nx;
+              Q <= q_nx;
             end
           end
         end

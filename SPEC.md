@@ -405,3 +405,17 @@ label:  op operands      # comment   (';' also starts a comment)
 * Single privilege level; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
 * No interrupts, no FPU, no atomics, no fence for self-modifying code.
+
+## 10. Reference implementation notes (non-architectural)
+
+These describe `rtl/` timing only; software must not depend on them.
+
+* **Divider (v2):** radix-4 restoring divider on magnitudes. Each radix-4 step compares `4R+d` against `B`, `2B`
+  and `3B` in parallel and retires two quotient bits; the default build chains `DIV_STEPS = 2` steps per cycle
+  (4 quotient bits/cycle; `+define+TX_DIV_STEPS=1` gives plain radix-4, 2 bits/cycle). **Early termination:**
+  only `n = sig(|a|) − sig(|b|) + 1` quotient bits are computed (rounded up to a multiple of the bits per
+  cycle); the remainder register is preloaded with the top bits of `|a|` that cannot yet yield a quotient 1.
+  Latency = `ceil(n / bits_per_cycle) + 2` cycles (2 when `|a| < 2^(sig(|b|)−1)`), instant for divide-by-zero,
+  0 extra for the paired `rem`/`div` on the same operands (result cache). v1 was radix-2 with dividend-only
+  leading-zero skipping (up to 129 cycles).
+* **Multiplier:** radix-16 shift-add, 32 iterations for the full 256-bit product (unchanged).

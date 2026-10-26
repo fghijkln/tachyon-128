@@ -77,6 +77,22 @@ def tests():
         divu r25, r8, r7
         mul r26, r4, r9
 """ + POST
+    # divider early-termination edges: |a| and |b| of every relative width (n odd/even, 0, 1, 128)
+    r = random.Random(77)
+    widths = [1, 2, 3, 4, 7, 8, 63, 64, 65, 126, 127, 128]
+    for part in range(3):
+        body = []
+        for k, (wa, wb) in enumerate([(x, y) for x in widths for y in widths][part::3]):
+            a = (1 << (wa - 1)) | r.getrandbits(wa - 1) if wa > 1 else 1
+            b = (1 << (wb - 1)) | r.getrandbits(wb - 1) if wb > 1 else 1
+            if k % 5 == 0:
+                b = (1 << wb) - 1                  # all-ones divisor
+            if k % 7 == 0:
+                a = b                              # equal operands
+            op = ["divu", "remu", "div", "rem"][k % 4]
+            body.append(f"        li r4, {a}\n        li r5, {b}\n        {op} r{10 + k % 40}, r4, r5")
+            body.append(f"        neg r6, r4\n        {['div', 'rem'][k % 2]} r{50 + k % 8}, r6, r5")
+        T[f"md_div_widths{part}"] = PRE + "\n".join(body) + "\n" + POST
     for i, base in enumerate(SIMD_FUNCS):
         for suf in LANE_SUFFIX:
             if base == "vmul" and suf == "d":

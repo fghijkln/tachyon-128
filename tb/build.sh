@@ -3,7 +3,7 @@
 set -e
 source ~/env.sh 2>/dev/null || true
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT=$ROOT/build/vtb
+OUT=${TX_VTB_DIR:-$ROOT/build/vtb}
 mkdir -p $OUT
 cd $OUT
 verilator --cc --exe --build -j 2 -O2 -Wall -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
