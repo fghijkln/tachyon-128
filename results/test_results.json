@@ -1,0 +1,52 @@
+{
+ "unit": {
+  "passed": 133,
+  "total": 133,
+  "cycles": 15191,
+  "retired": 9185
+ },
+ "random": {
+  "passed": 2000,
+  "total": 2000,
+  "cycles": 2069764,
+  "retired": 1090156
+ },
+ "programs": {
+  "passed": 5,
+  "total": 5,
+  "cycles": 36930,
+  "retired": 12867,
+  "per_test": {
+   "fib": {
+    "ok": true,
+    "cycles": 14681,
+    "retired": 6476,
+    "cpi": 2.267
+   },
+   "fact": {
+    "ok": true,
+    "cycles": 16498,
+    "retired": 2838,
+    "cpi": 5.813
+   },
+   "sort": {
+    "ok": true,
+    "cycles": 2868,
+    "retired": 1564,
+    "cpi": 1.834
+   },
+   "simd": {
+    "ok": true,
+    "cycles": 1309,
+    "retired": 916,
+    "cpi": 1.429
+   },
+   "capfault": {
+    "ok": true,
+    "cycles": 1574,
+    "retired": 1073,
+    "cpi": 1.467
+   }
+  }
+ }
+}

@@ -1,0 +1,242 @@
+
+23. Printing statistics.
+
+=== $paramod\tx_simd_lanes\W=s32'00000000000000000000000000010000 ===
+
+        +----------Local Count, excluding submodules.
+        | 
+    12230 wires
+    12880 wire bits
+       22 public wires
+      672 public wire bits
+        4 ports
+      389 port bits
+    12336 cells
+      137   $_ANDNOT_
+     3367   $_AND_
+      674   $_MUX_
+     4898   $_NAND_
+       37   $_NOR_
+       15   $_NOT_
+      254   $_ORNOT_
+      503   $_OR_
+      667   $_XNOR_
+     1784   $_XOR_
+
+=== $paramod\tx_simd_lanes\W=s32'00000000000000000000000000100000 ===
+
+        +----------Local Count, excluding submodules.
+        | 
+    18630 wires
+    19301 wire bits
+       14 public wires
+      685 public wire bits
+        4 ports
+      389 port bits
+    18744 cells
+      123   $_ANDNOT_
+     4577   $_AND_
+      911   $_MUX_
+     7784   $_NAND_
+       52   $_NOR_
+       15   $_NOT_
+      259   $_ORNOT_
+      494   $_OR_
+      732   $_XNOR_
+     3797   $_XOR_
+
+=== $paramod\tx_simd_lanes\W=s32'00000000000000000000000001000000 ===
+
+        +----------Local Count, excluding submodules.
+        | 
+     6780 wires
+     7676 wire bits
+       11 public wires
+      907 public wire bits
+        4 ports
+      389 port bits
+     6897 cells
+      107   $_ANDNOT_
+     2153   $_AND_
+     1150   $_MUX_
+     2444   $_NAND_
+       51   $_NOR_
+       25   $_NOT_
+      228   $_ORNOT_
+      359   $_OR_
+      190   $_XNOR_
+      190   $_XOR_
+
+=== tx_core ===
+
+        +----------Local Count, excluding submodules.
+        | 
+    18708 wires
+    30294 wire bits
+      155 public wires
+     9046 public wire bits
+       21 ports
+     1255 port bits
+    25341 cells
+     1582   $_ANDNOT_
+     4905   $_AND_
+     1958   $_DFFE_PP_
+       11   $_DFF_P_
+     4154   $_MUX_
+     5816   $_NAND_
+     1177   $_NOR_
+      230   $_NOT_
+      913   $_ORNOT_
+     1488   $_OR_
+      525   $_SDFFCE_PP0P_
+        2   $_SDFFCE_PP1P_
+        3   $_SDFFE_PP0N_
+      866   $_SDFFE_PP0P_
+        1   $_SDFF_PP0_
+      881   $_XNOR_
+      826   $_XOR_
+        3   $mem_v2
+        3 submodules
+        1   tx_alu
+        1   tx_muldiv
+        1   tx_simd
+
+=== tx_muldiv ===
+
+        +----------Local Count, excluding submodules.
+        | 
+     8345 wires
+    13787 wire bits
+       40 public wires
+     2606 public wire bits
+        9 ports
+      392 port bits
+    11539 cells
+      118   $_ANDNOT_
+     2067   $_AND_
+     1285   $_DFFE_PP_
+     1730   $_MUX_
+     1999   $_NAND_
+      452   $_NOR_
+      552   $_NOT_
+      270   $_ORNOT_
+      870   $_OR_
+      256   $_SDFFCE_PN0P_
+       12   $_SDFFE_PP0P_
+      784   $_XNOR_
+     1144   $_XOR_
+
+=== tx_simd ===
+
+        +----------Local Count, excluding submodules.
+        | 
+      781 wires
+     1675 wire bits
+        9 public wires
+      903 public wire bits
+        5 ports
+      391 port bits
+      900 cells
+        2   $_ANDNOT_
+      257   $_AND_
+      640   $_NAND_
+        1   $_NOR_
+        4 submodules
+        1   $paramod\tx_simd_lanes\W=s32'00000000000000000000000000001000
+        1   $paramod\tx_simd_lanes\W=s32'00000000000000000000000000010000
+        1   $paramod\tx_simd_lanes\W=s32'00000000000000000000000000100000
+        1   $paramod\tx_simd_lanes\W=s32'00000000000000000000000001000000
+
+=== $paramod\tx_simd_lanes\W=s32'00000000000000000000000000001000 ===
+
+        +----------Local Count, excluding submodules.
+        | 
+     9085 wires
+     9718 wire bits
+       38 public wires
+      671 public wire bits
+        4 ports
+      389 port bits
+     9175 cells
+      287   $_ANDNOT_
+     2729   $_AND_
+      485   $_MUX_
+     3334   $_NAND_
+      100   $_NOR_
+       22   $_NOT_
+      355   $_ORNOT_
+      519   $_OR_
+      632   $_XNOR_
+      712   $_XOR_
+
+=== tx_alu ===
+
+        +----------Local Count, excluding submodules.
+        | 
+     8001 wires
+     8392 wire bits
+        5 public wires
+      396 public wire bits
+        4 ports
+      389 port bits
+     8124 cells
+      302   $_ANDNOT_
+     1933   $_AND_
+     1551   $_MUX_
+     2641   $_NAND_
+      194   $_NOR_
+       24   $_NOT_
+      103   $_ORNOT_
+      605   $_OR_
+      399   $_XNOR_
+      372   $_XOR_
+
+=== design hierarchy ===
+
+        +----------Count including submodules.
+        | 
+    93056 tx_core
+     8124 tx_alu
+    11539 tx_muldiv
+      900 tx_simd
+     9175   $paramod\tx_simd_lanes\W=s32'00000000000000000000000000001000
+    12336   $paramod\tx_simd_lanes\W=s32'00000000000000000000000000010000
+    18744   $paramod\tx_simd_lanes\W=s32'00000000000000000000000000100000
+     6897   $paramod\tx_simd_lanes\W=s32'00000000000000000000000001000000
+
+        +----------Count including submodules.
+        | 
+    82560 wires
+   103723 wire bits
+      294 public wires
+    15886 public wire bits
+       55 ports
+     3983 port bits
+        - memories
+        - memory bits
+        - processes
+    93056 cells
+     2658   $_ANDNOT_
+    21988   $_AND_
+     3243   $_DFFE_PP_
+       11   $_DFF_P_
+    10655   $_MUX_
+    29556   $_NAND_
+     2064   $_NOR_
+      883   $_NOT_
+     2382   $_ORNOT_
+     4838   $_OR_
+      256   $_SDFFCE_PN0P_
+      525   $_SDFFCE_PP0P_
+        2   $_SDFFCE_PP1P_
+        3   $_SDFFE_PP0N_
+      878   $_SDFFE_PP0P_
+        1   $_SDFF_PP0_
+     4285   $_XNOR_
+     8825   $_XOR_
+        3   $mem_v2
+        3 submodules
+        1   tx_alu
+        1   tx_muldiv
+        1   tx_simd
+

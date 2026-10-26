@@ -148,11 +148,24 @@ fib/fact are dominated by software decimal printing, i.e. 128-bit divides (up to
 
 ### Synthesis (Yosys 0.70, generic gates)
 
-See `build/synth_stat.txt` (flattened, ABC-mapped) and `build/synth_stat_techmap.txt` (hierarchical, techmap only).
+Full reports: `results/synth_stat_abc.txt` (hierarchical, ABC-mapped — `make synth`) and `results/synth_stat_techmap.txt` (techmap only).
 The register file is kept as memory macros (`$mem_v2`, 64×128 b and 64×261 b, 2 read / 1 write), as a
 real implementation would use a register-file compiler.
 
-SYNTH_TABLE_PLACEHOLDER
+| Block (hierarchical, after ABC) | Cells |
+|---|---:|
+| **tx_core total** | **93 056** |
+| ├ tx_alu (128-bit ALU incl. barrel shifters, clz/ctz/popcnt) | 8 124 |
+| ├ tx_muldiv (iterative mul/div + result cache) | 11 539 |
+| ├ tx_simd (8/16/32/64-bit lane arrays incl. 28 lane multipliers) | 48 052 |
+| └ core glue (pipeline regs, forwarding, capability checks, CSRs, decode) | 25 341 |
+| of which flip-flops | 4 919 |
+| of which register-file memory macros (`$mem_v2`) | 3 |
+| combinational gates (AND/NAND/OR/NOR/XOR/XNOR/MUX/NOT…) | 88 134 |
+
+Techmap-only (no ABC) count: 107 346 cells. Synthesis runtime ≈ 35 s (WebAssembly Yosys).
+The SIMD unit dominates area because every lane width has its own datapath; sharing one
+segmented adder/multiplier array across widths is the obvious next optimisation.
 
 ## Known gaps (v1)
 
