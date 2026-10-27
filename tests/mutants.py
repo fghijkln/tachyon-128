@@ -48,6 +48,10 @@ MUTANTS = [
     ("csrw_can_set_user_bit", "tx_core.sv", "{exmem_val[4], csr_status[3], exmem_val[2:0]}", "exmem_val[4:0]"),
     ("priv_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store & ~exmem_trap &",
      "assign dmem_we    = mem_v & exmem_store & ~exmem_trap0 &"),
+    ("btb_not_taken_uncorrected", "tx_core.sv", "ex_k[K_BR] ? (br_taken ? br_target : ex_pc4)",
+     "ex_k[K_BR] ? (br_taken ? br_target : idex_pnpc)"),
+    ("btb_jalr_target_low_bits_only", "tx_core.sv", "ex_k[K_JALR] ? jalr_tgt : ex_pc4;",
+     "ex_k[K_JALR] ? {jalr_tgt[127:18], idex_pnpc[17:0]} : ex_pc4;"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

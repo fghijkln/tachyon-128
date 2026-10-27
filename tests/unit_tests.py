@@ -944,6 +944,94 @@ uloop:  addi r21, r21, 3
         csrr r24, status
         halt zero
 """ + phandler + DATA
+    # ---------------- v3: branch target buffer + 2-bit predictor (architecturally invisible; every
+    #                  prediction must be verified: stale targets, aliasing, pattern changes, traps)
+    T["btb_patterns"] = PRE + """
+        li r4, 40
+outer:  andi r5, r4, 1
+        beqz r5, even            # alternates T/NT: the 2-bit counter keeps mispredicting one way
+        addi r6, r6, 1
+even:   andi r5, r4, 7
+        bnez r5, skip8           # taken 7 of 8
+        addi r7, r7, 1
+skip8:  li r8, 3
+inner:  addi r9, r9, 1           # short inner loop: exit mispredict every time
+        addi r8, r8, -1
+        bnez r8, inner
+        beq r0, r0, fwd          # always-taken forward branch (static says not taken; BTB learns)
+        addi r10, r10, 1         # never
+fwd:    bne r0, r0, fwd2         # never taken
+        beq r4, r4, fwd2         # taken to the very next instruction (target == pc + 4)
+fwd2:   jal r1, nxt              # jal to the next instruction
+nxt:    addi r4, r4, -1
+        bnez r4, outer
+        halt zero
+"""
+    T["btb_jalr_targets"] = PRE + """
+        li r20, 6
+loop:   jal r1, sub              # three call sites: the return jalr's BTB target is stale each time
+        addi r21, r21, 1
+        jal r1, sub
+        addi r22, r22, 2
+        jal r1, sub
+        addi r23, r23, 3
+        andi r24, r20, 3         # indirect jump through a table: target changes every iteration
+        slli r24, r24, 2
+        la r25, jtab
+        add r25, r25, r24
+        jalr r0, r25, 0
+back:   addi r20, r20, -1
+        bnez r20, loop
+        halt zero
+sub:    addi r26, r26, 1
+        ret
+jtab:   j t0
+        j t1
+        j t2
+        j t3
+t0:     addi r30, r30, 1
+        j back
+t1:     addi r31, r31, 1
+        j back
+t2:     addi r32, r32, 1
+        j back
+t3:     addi r33, r33, 1
+        j back
+"""
+    T["btb_alias"] = PRE + """
+        li r4, 12
+a_top:  addi r5, r5, 1           # a branch and the instruction 64 bytes later share a BTB index
+        bnez r5, a_b1            # (always taken)
+a_b1:   nop
+""" + "        nop\n" * 13 + """
+        andi r6, r4, 1           # 64 bytes after the branch above: same index, different tag
+        beqz r6, a_b2
+        addi r7, r7, 1
+a_b2:   addi r4, r4, -1
+        bnez r4, a_top
+        halt zero
+"""
+    T["btb_traps"] = PRE + setup + """
+        li r20, 8
+        li r21, -0x10000
+tloop:  addi r20, r20, -1
+        beqz r20, tdone
+        andi r22, r20, 1
+        bnez r22, tfault         # learned taken, then a trap right at the target
+        lw r23, 0(r5)
+        j tloop
+tfault: lw r23, 2(r5)            # misaligned: trap at a predicted target
+        jal r1, tsub             # call, return predicted from the BTB ...
+        j tloop
+tsub:   la r24, tfn              # ... and a cjalr at a BTB-trained pc (cjalr is never predicted)
+        csetaddr r24, rc, r24
+        csetbndi r24, r24, 8
+        cjalr r25, r24
+        ret
+tfn:    addi r26, r26, 1
+        cjalr r0, r25
+tdone:  halt zero
+""" + handler + DATA
     T["seal_hazards"] = PRE + setup + """
         li r6, 7
         csetaddr r11, rc, r6

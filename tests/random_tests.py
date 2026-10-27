@@ -63,9 +63,9 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2])[0]
-        if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user"):
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2])[0]
+        if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user", "bpat", "call"):
             k = "alu"
         if k == "alu":
             f = r.choice(ALU_FUNCS)
@@ -280,6 +280,20 @@ class Gen:
                 else:
                     self.one(allow_ctrl=False)
             self.emit("ecall")
+        elif k == "bpat":           # loop with a data-dependent inner branch (exercises the 2-bit counters)
+            L, Ls = self.label(), self.label()
+            self.emit(f"li r61, {r.randint(2, 12)}")
+            self.out.append(f"{L}:")
+            self.emit(f"andi r57, r61, {r.choice([1, 2, 3, 4, 7])}")
+            self.emit(f"{r.choice(['beqz', 'bnez'])} r57, {Ls}")
+            for _ in range(r.randint(0, 2)):
+                self.one(allow_ctrl=False)
+            self.out.append(f"{Ls}:")
+            self.one(allow_ctrl=False)
+            self.emit("addi r61, r61, -1")
+            self.emit(f"bnez r61, {L}")
+        elif k == "call":           # shared subroutines called from many sites: stale BTB return targets
+            self.emit(f"jal r1, SUB{r.randint(0, 1)}")
         elif k == "csr":
             if r.random() < 0.5:
                 self.emit(f"csrw scratch, r{self.src()}")
@@ -333,6 +347,11 @@ def gen_program(seed, n=None):
     for _ in range(n):
         g.one()
     g.emit("halt zero")
+    for k in range(2):                      # shared subroutines for the "call" stream
+        g.out.append(f"SUB{k}:")
+        for _ in range(r.randint(1, 3)):
+            g.one(allow_ctrl=False)
+        g.emit("jalr r0, r1, 0")
     g.out.append("handler:")
     g.emit("csrr r62, cause")
     g.emit("bltz r62, Hirq")

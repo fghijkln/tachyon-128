@@ -93,7 +93,9 @@ module tx_core #(
   logic [127:0] ifid_pc;
   logic [31:0]  ifid_inst;
   // ID/EX
-  logic         idex_valid, idex_fault, idex_pred, idex_we;
+  logic         idex_valid, idex_fault, idex_we;
+  logic         ifid_bpred, ifid_bhit;        // BTB predicted taken / BTB hit for this fetch
+  logic [127:0] ifid_pnpc, idex_pnpc;         // predicted next pc carried with the instruction
   logic [127:0] idex_pc, idex_v1, idex_v2;
   logic [MW-1:0] idex_m1, idex_m2;
   logic [31:0]  idex_inst;
@@ -161,6 +163,23 @@ module tx_core #(
   wire [3:0]   if_fcause = if_noexec ? C_CAP_PERM : (if_oob ? C_CAP_BOUNDS : C_ACCESS);
   assign imem_addr = pc_q;
 
+  // ---- branch target buffer: 16 entries, direct-mapped on pc[5:2], tag pc[17:6] (with the index this covers
+  //      every word of the 256 KiB RAM), 16-bit word target (pc[17:2]) and a 2-bit saturating counter.
+  //      Predicts taken branches, JAL and JALR in IF; every prediction is verified in EX.
+  //      +define+TX_NO_BTB gives the v2 front end (static BTFN in ID only).
+  logic          btb_v   [0:15];
+  logic [11:0]   btb_tag [0:15];
+  logic [15:0]   btb_tgt [0:15];
+  logic [1:0]    btb_ctr [0:15];
+  wire  [3:0]    if_bi   = pc_q[5:2];
+`ifdef TX_NO_BTB
+  wire           if_bhit = 1'b0;
+`else
+  wire           if_bhit = btb_v[if_bi] & (btb_tag[if_bi] == pc_q[17:6]);
+`endif
+  wire           if_bpred = if_bhit & btb_ctr[if_bi][1];
+  wire [127:0]   if_pnpc  = if_bpred ? {pc_q[127:18], btb_tgt[if_bi], 2'b00} : pc_q + 128'd4;
+
   // ======================================================================== ID
   wire [NK-1:0] id_k   = decode(ifid_inst);
   wire [5:0]   id_fa   = ifid_inst[11:6];
@@ -189,7 +208,8 @@ module tx_core #(
 
   wire [127:0] id_imm14 = {{114{ifid_inst[31]}}, ifid_inst[31:18]};
   wire [127:0] id_imm20 = {{108{ifid_inst[31]}}, ifid_inst[31:12]};
-  wire         id_pred  = id_k[K_BR] & ifid_inst[31];          // backward branch -> taken
+  // static fallback when the BTB had no entry: backward branch -> taken; JAL always (unless the BTB already did)
+  wire         id_static = id_k[K_BR] & ifid_inst[31] & ~ifid_bhit;
   wire [127:0] id_target = id_k[K_JAL] ? ifid_pc + (id_imm20 << 2) : ifid_pc + (id_imm14 << 2);
 
   // load-use / csrr-use interlock
@@ -400,12 +420,19 @@ module tx_core #(
   wire [127:0] ex_pc4    = idex_pc + 128'd4;
   wire [127:0] br_target = idex_pc + (ex_imm << 2);
   wire [127:0] jalr_tgt  = (a + ex_imm) & ~128'd3;
-  wire ex_mispred = ex_k[K_BR] & (br_taken != idex_pred);
+  wire [127:0] jal_tgt   = idex_pc + ({{108{idex_inst[31]}}, idex_inst[31:12]} << 2);
+  // actual next pc of the instruction in EX; any difference from the predicted one is a misprediction
+  wire [127:0] ex_anpc   = ex_k[K_BR] ? (br_taken ? br_target : ex_pc4) : ex_k[K_JAL] ? jal_tgt :
+                           ex_k[K_JALR] ? jalr_tgt : ex_pc4;
   // cjalr and cinvoke both jump to rs1's cursor and install rs1 (unsealed) as the PCC
   wire ex_cjalr  = ex_k[K_CAPR] & ((ex_fn[4:0] == CF_CJALR) | (ex_fn[4:0] == CF_CINVOKE));
   wire ex_setepcc = ex_k[K_CAPR] & (ex_fn[4:0] == CF_CSETEPCC);
-  wire ex_redirect = idex_valid & (ex_mispred | ex_k[K_JALR] | (ex_cjalr & ~cap_fault));
-  wire [127:0] ex_target = ex_cjalr ? (a & ~128'd3) : ex_k[K_JALR] ? jalr_tgt : (br_taken ? br_target : ex_pc4);
+  // cjalr / cinvoke always redirect (they also switch the fetch PCC); trapping instructions never do
+  wire ex_redirect = idex_valid & ~ex_trap & (ex_cjalr | (ex_anpc != idex_pnpc));
+  wire [127:0] ex_target = ex_cjalr ? (a & ~128'd3) : ex_anpc;
+  wire btb_upd = idex_valid & ~ex_trap & ~stall_md & ~mem_redirect & (ex_k[K_BR] | ex_k[K_JAL] | ex_k[K_JALR]);
+  wire [3:0] ex_bi = idex_pc[5:2];
+  wire ex_bhit = btb_v[ex_bi] & (btb_tag[ex_bi] == idex_pc[17:6]);
 
   // ---- result + trap select
   logic [127:0]  ex_val, ex_tval;
@@ -504,7 +531,8 @@ module tx_core #(
 
   // ======================================================================== control
   wire stall = stall_lu | stall_md;
-  wire id_redirect = ifid_valid & ~ifid_fault & (id_k[K_JAL] | id_pred);
+  wire id_redirect = ifid_valid & ~ifid_fault & ((id_k[K_JAL] & ~ifid_bpred) | id_static);
+  wire [127:0] id_pnpc = id_redirect ? id_target : ifid_pnpc;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -519,7 +547,7 @@ module tx_core #(
       else if (ex_redirect)  pc_q <= ex_target;
       else if (stall)        pc_q <= pc_q;
       else if (id_redirect)  pc_q <= id_target;
-      else if (!stop_fetch_q) pc_q <= pc_q + 128'd4;
+      else if (!stop_fetch_q) pc_q <= if_pnpc;
       if (mem_halt | mem_trap_halt) stop_fetch_q <= 1'b1;
       if (mem_redirect)     fpcc_q <= mem_tpcc;
       else if (ex_redirect & ex_cjalr) fpcc_q <= ma_unsealed;
@@ -537,6 +565,9 @@ module tx_core #(
         ifid_inst  <= imem_rdata;
         ifid_fault <= if_fault;
         ifid_fcause <= if_fcause;
+        ifid_pnpc  <= if_pnpc;
+        ifid_bpred <= if_bpred;
+        ifid_bhit  <= if_bhit;
       end
 
       // ---------------- ID/EX
@@ -548,7 +579,7 @@ module tx_core #(
         idex_pc <= ifid_pc; idex_inst <= ifid_inst; idex_fault <= ifid_fault; idex_fcause <= ifid_fcause;
         idex_rs1 <= id_rs1; idex_rs2 <= id_rs2; idex_rd <= id_fa; idex_we <= id_we;
         idex_v1 <= id_v1; idex_v2 <= id_v2; idex_m1 <= id_m1; idex_m2 <= id_m2;
-        idex_pred <= id_pred;
+        idex_pnpc <= id_pnpc;
       end
 
       // ---------------- EX/MEM
@@ -637,6 +668,27 @@ module tx_core #(
       if (memwb_valid && memwb_halt) begin
         halted_q <= 1'b1;
         exit_q   <= memwb_trap ? 32'd0 : memwb_code;
+      end
+    end
+  end
+
+  // ---- BTB update (EX): allocate on taken branches / jumps, train the counter on every branch
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      for (int i = 0; i < 16; i++) btb_v[i] <= 1'b0;
+    end else if (btb_upd && !halted_q) begin
+      if (ex_k[K_BR]) begin
+        if (ex_bhit) begin
+          btb_ctr[ex_bi] <= br_taken ? ((btb_ctr[ex_bi] == 2'd3) ? 2'd3 : btb_ctr[ex_bi] + 2'd1)
+                                     : ((btb_ctr[ex_bi] == 2'd0) ? 2'd0 : btb_ctr[ex_bi] - 2'd1);
+          btb_tgt[ex_bi] <= br_target[17:2];
+        end else if (br_taken) begin
+          btb_v[ex_bi] <= 1'b1; btb_tag[ex_bi] <= idex_pc[17:6];
+          btb_tgt[ex_bi] <= br_target[17:2]; btb_ctr[ex_bi] <= 2'd2;
+        end
+      end else begin                     // JAL / JALR: last target, always taken
+        btb_v[ex_bi] <= 1'b1; btb_tag[ex_bi] <= idex_pc[17:6];
+        btb_tgt[ex_bi] <= ex_anpc[17:2]; btb_ctr[ex_bi] <= 2'd3;
       end
     end
   end

@@ -554,6 +554,15 @@ These describe `rtl/` timing only; software must not depend on them.
   Latency = `ceil(n / bits_per_cycle) + 2` cycles (2 when `|a| < 2^(sig(|b|)−1)`), instant for divide-by-zero,
   0 extra for the paired `rem`/`div` on the same operands (result cache). v1 was radix-2 with dividend-only
   leading-zero skipping (up to 129 cycles).
+* **Branch prediction (v3):** a 16-entry direct-mapped **branch target buffer** in IF (index `pc[5:2]`, tag
+  `pc[17:6]` — together they identify every word of the 256 KiB RAM — 16-bit word target, 2-bit saturating counter).
+  A hit with counter ≥ 2 redirects fetch to the target with no bubble. Entries are allocated in EX by taken
+  branches (counter 2), `jal` and `jalr` (last target, counter 3); every branch trains its counter. Without a BTB hit,
+  ID falls back to the v2 static rule (backward branches and `jal` redirect with 1 bubble). Each instruction carries
+  its predicted next pc; EX compares it with the actual next pc and redirects on any difference (2-cycle penalty),
+  so stale targets, aliasing outside RAM, or a pattern change can only cost cycles. `cjalr`/`cinvoke` are never
+  predicted (they also switch the fetch PCC) and always redirect from EX. `+define+TX_NO_BTB` restores the static
+  front end. Prediction is invisible to software: the golden model has no notion of it.
 * **Multiplier (v3):** radix-2^32 multi-pass multiplier. Each cycle one 128 × 32 partial-product array (reduced
   carry-save by synthesis) is added to the upper half of a 256-bit accumulator, which then shifts right by 32;
   four passes produce the full 256-bit product and the last pass writes the result cache directly.
