@@ -8,5 +8,5 @@ mkdir -p $OUT
 cd $OUT
 verilator --cc --exe --build -j 2 -O2 -Wall -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
   --top-module tb -I$ROOT/rtl --Mdir $OUT/obj \
-  $ROOT/rtl/tx_alu.sv $ROOT/rtl/tx_simd.sv $ROOT/rtl/tx_muldiv.sv $ROOT/rtl/tx_core.sv $ROOT/tb/tb.sv $ROOT/tb/tb_main.cpp \
+  $ROOT/rtl/tx_alu.sv $ROOT/rtl/tx_simd.sv $ROOT/rtl/tx_mul32x4.sv $ROOT/rtl/tx_muldiv.sv $ROOT/rtl/tx_core.sv $ROOT/tb/tb.sv $ROOT/tb/tb_main.cpp \
   -o $OUT/Vtb "$@"

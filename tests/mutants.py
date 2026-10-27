@@ -53,6 +53,13 @@ MUTANTS = [
      "ex_k[K_BR] ? (br_taken ? br_target : idex_pnpc)"),
     ("btb_jalr_target_low_bits_only", "tx_core.sv", "ex_k[K_JALR] ? jalr_tgt : ex_pc4;",
      "ex_k[K_JALR] ? {jalr_tgt[127:18], idex_pnpc[17:0]} : ex_pc4;"),
+    # ---- v4 features
+    ("booth_no_lane_closing_digit", "tx_mul32x4.sv", "s = s + ({32'd0, a & pm & {32{b[2*j-1] & bnd}}} << (2*j));", "s = s;"),
+    ("booth_lane_boundary_bit_kept", "tx_mul32x4.sv", "(b[2*j-1] & ~bnd);", "b[2*j-1];"),
+    ("booth_top_digit_ignores_lane", "tx_mul32x4.sv", "((s16 | s8) ? pm : 32'hFFFF_FFFF)", "32'hFFFF_FFFF"),
+    ("shared_mul_16b_mode_wrong", "tx_core.sv", "ex_fn[1:0] == 2'd1 ? 2'd1 : 2'd0", "ex_fn[1:0] == 2'd1 ? 2'd2 : 2'd0"),
+    ("shared_mul_not_claimed", "tx_core.sv", ".x(sh_busy ? sh_x : a)", ".x(a)"),
+    ("mul_pass_product_misaligned", "tx_muldiv.sv", "{sh_p[255:192], sh_p[127:64], 32'd0}", "{sh_p[223:192], sh_p[127:64], 64'd0}"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

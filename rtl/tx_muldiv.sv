@@ -1,7 +1,10 @@
 // TACHYON-128 iterative multiply/divide unit.
 //  * MUL/MULHU: radix-2^MUL_BITS multiplier: each cycle one 128 x MUL_BITS partial-product array
-//    (carry-save reduced by synthesis) is added into the 256-bit accumulator. Default MUL_BITS = 32:
-//    4 passes, latency 6 cycles in EX (v2: radix-16, 32 passes, 35 cycles). Full 256-bit product.
+//    is added into the 256-bit accumulator. Default MUL_BITS = 32: 4 passes, latency 6 cycles in EX
+//    (v2: radix-16, 32 passes, 35 cycles). Full 256-bit product.
+//    v4: with MUL_BITS = 32 the 128 x 32 array is NOT inside this module: each pass borrows the
+//    core's shared tx_mul32x4 (four Booth-recoded 32 x 32 multipliers that SIMD vmul also uses) through
+//    the sh_* ports and only adds the four 64-bit products into the accumulator here.
 //  * DIV/DIVU/REM/REMU: radix-4 restoring on magnitudes (2 quotient bits per cycle: the three
 //    candidates 4R+d-B, 4R+d-2B, 4R+d-3B are compared in parallel) with operand-normalised early
 //    termination: only n = sig(|a|) - sig(|b|) + 1 quotient bits are produced (rounded up to even),
@@ -33,7 +36,12 @@ module tx_muldiv #(
   input  wire logic [127:0] a,
   input  wire logic [127:0] b,
   output logic              ready,   // y valid this cycle; EX may advance
-  output logic      [127:0] y
+  output logic      [127:0] y,
+  // shared multiplier array (used when MUL_BITS == 32): one 128 x 32 pass per cycle
+  output logic              sh_busy, // a multiply pass needs the array this cycle
+  output logic      [127:0] sh_x,    // multiplicand
+  output logic      [31:0]  sh_z,    // multiplier chunk (same for all four 32 x 32 multipliers)
+  input  wire logic [255:0] sh_p     // four 64-bit products: sh_p[64i +: 64] = sh_x[32i +: 32] * sh_z
 );
   localparam logic [1:0] IDLE = 2'd0, RUN = 2'd1, DONE = 2'd2;
   logic [1:0] st;
@@ -85,7 +93,17 @@ module tx_muldiv #(
 
   // one multiply pass: high half + multiplicand x next MUL_BITS multiplier bits
   localparam int MPASS = 128 / MUL_BITS;
-  wire [127+MUL_BITS:0] mstep = {{MUL_BITS{1'b0}}, acc[255:128]} + mA * acc[MUL_BITS-1:0];
+  logic [127+MUL_BITS:0] mstep;
+  assign sh_x = mA;
+  assign sh_z = acc[31:0];
+  generate if (MUL_BITS == 32) begin : g_shared
+    assign sh_busy = (st == RUN) & lmul;
+    // four products at bit offsets 0/32/64/96: two non-overlapping concatenations + the accumulator
+    assign mstep = {32'd0, acc[255:128]} + {32'd0, sh_p[191:128], sh_p[63:0]} + {sh_p[255:192], sh_p[127:64], 32'd0};
+  end else begin : g_own
+    assign sh_busy = 1'b0;
+    assign mstep = {{MUL_BITS{1'b0}}, acc[255:128]} + mA * acc[MUL_BITS-1:0];
+  end endgenerate
   wire [255:0]          acc_nx = {mstep, acc[127:MUL_BITS]};
   // radix-4 divide step: r4 = 4R + next two dividend bits (< 4B); candidates compared in parallel
   function automatic logic [129:0] r4step(input logic [127:0] r, input logic [1:0] nb,

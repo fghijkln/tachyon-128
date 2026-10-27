@@ -1,4 +1,4 @@
-# TACHYON-128 Instruction Set Architecture — v3.0
+# TACHYON-128 Instruction Set Architecture — v4.0
 
 > *"Faster than light, wider than life."*  A 128-bit load/store architecture with hardware
 > capabilities, in-register SIMD lanes and wide-immediate constant fusion.
@@ -26,6 +26,7 @@
 - **异常**：非法指令、能力错误（tag/边界/权限/密封）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
 - **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
+- **v4 微架构**：乘法器面积缩小——标量乘法的 128×32 部分积阵列与 SIMD `vmul` 共享一块“可拆分”的 4×(32×32) radix-4 Booth 乘法阵列（仍为 6 周期）。
 - **实现**：Python 汇编器/反汇编器/黄金参考模拟器；SystemVerilog 五级流水线（前递、load-use 互锁、v3 BTB + 2 位计数器分支预测、v3 4 遍 6 周期乘法器、radix-4 除法器，带结果缓存），用 Verilator 与黄金模型逐条提交轨迹对比验证，用 Yosys 综合统计单元数。
 
 ---
@@ -569,3 +570,16 @@ These describe `rtl/` timing only; software must not depend on them.
   Latency = 6 cycles in EX (1 issue + 4 passes + 1 result), v2's radix-16 shift-add needed 35. `mul`/`mulhu` on
   the same operands still share one computation (result cache: the second one costs 0 extra cycles).
   `+define+TX_MUL_BITS=4` rebuilds the v2 radix-16 datapath (any divisor of 128 is a legal pass width).
+* **Shared multiplier array (v4):** the 128 × 32 pass array no longer lives in the multiply/divide unit. The core has
+  one `tx_mul32x4` block: four *fracturable* 32 × 32 multipliers, each computing either one unsigned 32 × 32 product
+  (64 bits), two 16 × 16 or four 8 × 8 exact lane products. A scalar multiply pass uses mode 32 with the same 32-bit
+  multiplier chunk on all four (`Σ pᵢ·2^(32i)` = multiplicand × chunk) and only the final 3-operand add into the
+  accumulator stays in the mul/div unit; SIMD `vmul.b/.h/.w` use modes 8/16/32 and take the low half of each lane
+  product. The two users never collide: while a `mul` iterates EX holds it, so no SIMD instruction can be in EX.
+  Each multiplier uses **radix-4 Booth recoding** (digits in {−2,−1,0,+1,+2} from overlapping bit triplets, 17 digit rows
+  instead of 32 AND rows). Fracturing: a digit whose low bit would come from the lane below drops it, the multiplicand of
+  each row is masked to the lane its digit belongs to, and every lane gets a closing digit (0 or +1, its top bit) so the
+  unsigned lane product is exact — exact non-negative lane products cannot carry into the next lane, so the lanes stay
+  independent despite the two's-complement rows. Latency is unchanged (6 cycles for `mul`/`mulhu`, 1 for `vmul`).
+  `+define+TX_MUL_ANDARRAY` swaps in a masked AND-array implementation of the same function (used to measure the Booth
+  saving); `tests/test_mul32x4.sh` checks both against C arithmetic in all three modes.

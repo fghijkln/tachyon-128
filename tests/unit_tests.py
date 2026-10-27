@@ -407,6 +407,47 @@ handler: addi r53, r53, 1
         csrw epc, r51
         eret
 """
+    # v4: shared multiplier array -- vmul lane boundaries (Booth closing digits) and scalar/SIMD sharing
+    pats = [0x80808080808080808080808080808080, 0x7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F7F, M,
+            0x80008000800080008000800080008000, 0x7FFF7FFF7FFF7FFF7FFF7FFF7FFF7FFF, 0xFF00FF00FF00FF00FF00FF00FF00FF00,
+            0x80000000800000008000000080000000, 0x7FFFFFFF7FFFFFFF7FFFFFFF7FFFFFFF, 0x00FF00FF00FF00FF00FF00FF00FF00FF,
+            0xFFFF0000FFFF0000FFFF0000FFFF0000, 0x0123456789ABCDEF_FEDCBA9876543210, 0x01010101010101010101010101010101,
+            0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, 0x55555555555555555555555555555555]
+    for part in range(2):
+        body = []
+        r = random.Random(900 + part)
+        for k in range(20):
+            x, y = r.choice(pats), r.choice(pats + [r.getrandbits(128)])
+            body.append(f"        li r4, {x}\n        li r5, {y}")
+            for suf in "bhw":
+                body.append(f"        vmul.{suf} r{10 + (3 * k + 'bhw'.index(suf)) % 50}, r4, r5")
+        T[f"simd_vmul_lanes{part}"] = PRE + "\n".join(body) + "\n" + POST
+    T["mul_share_hazards"] = PRE + """
+        la r4, handler
+        csrw tvec, r4
+        li r5, 0xFFFFFFFF80000000_7FFFFFFF00000001
+        li r6, 0x80808080FFFF0000_7F7F7F7F00FF00FF
+        vmul.b r7, r5, r6       # SIMD uses the array in the cycle before the mul claims it
+        mul r8, r5, r6
+        vmul.h r9, r8, r6       # needs the mul result (forwarded) and the array right after the last pass
+        mulhu r10, r5, r6       # result-cache hit: the array is not borrowed
+        vmul.w r11, r10, r5
+        mul r12, r11, r9
+        mul r13, r12, r12       # back-to-back multiplies
+        vmul.b r14, r13, r12
+        vmul.w r15, r14, r14
+        ld r16, 3(r0)           # misaligned: traps in MEM while the next mul is mid-pass
+        mul r17, r15, r6
+        vmul.h r18, r15, r6     # after the abort the array must be back in SIMD mode
+        mulhu r19, r15, r6
+        vmul.b r20, r19, r19
+        halt zero
+handler: addi r53, r53, 1
+        csrr r51, epc
+        addi r51, r51, 4
+        csrw epc, r51
+        eret
+"""
     T["haz_branch_dense"] = PRE + """
         li r4, 20
 loop:   addi r4, r4, -1

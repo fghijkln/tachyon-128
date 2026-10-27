@@ -63,8 +63,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2])[0]
         if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user", "bpat", "call"):
             k = "alu"
         if k == "alu":
@@ -119,6 +119,26 @@ class Gen:
             self.emit(f"{r.choice(['mul', 'mulhu'])} r{d}, r{ra}, r{rb}")
             if r.random() < 0.5:
                 self.emit(f"{r.choice(['mul', 'mulhu'])} r{self.dst()}, r{d}, r{r.choice([ra, rb, d])}")
+        elif k == "vmulx":          # v4 shared multiplier array: lane-edge vmul next to scalar mul passes
+            lanes = [0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF]
+            def lanev():
+                w = r.choice([8, 16, 32])
+                return sum((r.choice(lanes + [r.getrandbits(w)]) & ((1 << w) - 1)) << (w * j) for j in range(128 // w))
+            ra, rb = self.dst(), self.dst()
+            if ra == rb or 0 in (ra, rb):
+                return
+            self.emit(f"li r{ra}, {lanev()}")
+            self.emit(f"li r{rb}, {lanev() if r.random() < 0.7 else self.val()}")
+            seq = r.choice([["v", "m"], ["m", "v"], ["v", "m", "v"], ["m", "v", "m"], ["v", "v"]])
+            last = None
+            for op in seq:
+                x, y = r.choice([(ra, rb), (rb, ra), (ra, ra)] + ([(last, rb), (ra, last)] if last else []))
+                d = self.dst()
+                if op == "v":
+                    self.emit(f"vmul.{r.choice('bhw')} r{d}, r{x}, r{y}")
+                else:
+                    self.emit(f"{r.choice(['mul', 'mulhu'])} r{d}, r{x}, r{y}")
+                last = d if d else None
         elif k == "cap":
             f = r.choice([c for c in CAP_FUNCS if c not in ("cjalr", "cinvoke")] +
                          ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal", "csealentry"])

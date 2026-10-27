@@ -6,6 +6,7 @@ module tx_simd_lanes #(parameter int W = 8) (
   input  wire logic [4:0]   sop,
   input  wire logic [127:0] a,
   input  wire logic [127:0] b,
+  input  wire logic [255:0] mp,    // shared multiplier array output, split for this lane width (v4)
   output logic      [127:0] y
 );
   localparam int N = 128 / W;
@@ -32,9 +33,10 @@ module tx_simd_lanes #(parameter int W = 8) (
     localparam logic [W-1:0] SMAX = {1'b0, {(W-1){1'b1}}};
     localparam logic [W-1:0] SMIN = {1'b1, {(W-1){1'b0}}};
     logic [W-1:0] r;
-    logic [2*W-1:0] prod;
+    // v4: lane products come from the shared tx_mul32x4 (lane i of width W sits at bit 2*W*i of mp);
+    // vmul.d is illegal, so the 64-bit lanes have no product
+    wire [W-1:0] prod = (W == 64) ? '0 : mp[2*W*i +: W];
     always_comb begin
-      prod = (W == 64) ? '0 : x * z;   // vmul.d is illegal; no 64x64 multipliers built
       case (sop)
         5'd0:  r = uadd[W-1:0];                                           // vadd
         5'd1:  r = usub[W-1:0];                                           // vsub
@@ -49,7 +51,7 @@ module tx_simd_lanes #(parameter int W = 8) (
         5'd10: r = (x == z) ? {W{1'b1}} : '0;                             // vcmpeq
         5'd11: r = (!slt && x != z) ? {W{1'b1}} : '0;                     // vcmpgts
         5'd12: r = (!ult && x != z) ? {W{1'b1}} : '0;                     // vcmpgtu
-        5'd13: r = prod[W-1:0];                                           // vmul
+        5'd13: r = prod;                                                  // vmul
         5'd14: r = a[W-1:0];                                              // vsplat
         5'd16: r = x << sh;                                               // vsll
         5'd17: r = x >> sh;                                               // vsrl
@@ -66,13 +68,14 @@ module tx_simd (
   input  wire logic [1:0]   lw,
   input  wire logic [127:0] a,
   input  wire logic [127:0] b,
+  input  wire logic [255:0] mp,    // tx_mul32x4 products of a x b in the mode matching lw
   output logic      [127:0] y
 );
   logic [127:0] y8, y16, y32, y64;
-  tx_simd_lanes #(8) u8 (.sop(sop), .a(a), .b(b), .y(y8));
-  tx_simd_lanes #(16) u16 (.sop(sop), .a(a), .b(b), .y(y16));
-  tx_simd_lanes #(32) u32 (.sop(sop), .a(a), .b(b), .y(y32));
-  tx_simd_lanes #(64) u64 (.sop(sop), .a(a), .b(b), .y(y64));
+  tx_simd_lanes #(8) u8 (.sop(sop), .a(a), .b(b), .mp(mp), .y(y8));
+  tx_simd_lanes #(16) u16 (.sop(sop), .a(a), .b(b), .mp(mp), .y(y16));
+  tx_simd_lanes #(32) u32 (.sop(sop), .a(a), .b(b), .mp(mp), .y(y32));
+  tx_simd_lanes #(64) u64 (.sop(sop), .a(a), .b(b), .mp(mp), .y(y64));
   always_comb
     case (lw)
       2'd0: y = y8;

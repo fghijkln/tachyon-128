@@ -275,16 +275,27 @@ module tx_core #(
   logic [127:0] alu_y;
   tx_alu u_alu (.func(alu_fn), .a(a), .b(alu_b), .y(alu_y));
 
+  // ---- shared multiplier array (v4): 4 fracturable Booth 32x32 multipliers, used by SIMD vmul and by the
+  //      scalar multiplier's 128 x 32 passes (EX holds the mul while it iterates, so they never collide)
+  logic         sh_busy;
+  logic [127:0] sh_x;
+  logic [31:0]  sh_z;
+  logic [255:0] sh_p;
+  tx_mul32x4 u_mul (.x(sh_busy ? sh_x : a), .z(sh_busy ? {4{sh_z}} : b),
+                    .mode(sh_busy ? 2'd0 : (ex_fn[1:0] == 2'd0 ? 2'd2 : ex_fn[1:0] == 2'd1 ? 2'd1 : 2'd0)),
+                    .p(sh_p));
+
   // ---- SIMD
   logic [127:0] simd_y;
-  tx_simd u_simd (.sop(ex_fn[6:2]), .lw(ex_fn[1:0]), .a(a), .b(b), .y(simd_y));
+  tx_simd u_simd (.sop(ex_fn[6:2]), .lw(ex_fn[1:0]), .a(a), .b(b), .mp(sh_p), .y(simd_y));
 
   // ---- MUL/DIV
   logic md_ready;
   logic [127:0] md_y;
   logic mem_redirect;
   tx_muldiv u_md (.clk(clk), .rst(rst), .req(idex_valid & ex_k[K_MD] & ~halted_q), .abort(mem_redirect),
-                  .op(ex_fn[2:0]), .a(a), .b(b), .ready(md_ready), .y(md_y));
+                  .op(ex_fn[2:0]), .a(a), .b(b), .ready(md_ready), .y(md_y),
+                  .sh_busy(sh_busy), .sh_x(sh_x), .sh_z(sh_z), .sh_p(sh_p));
   wire stall_md = idex_valid & ex_k[K_MD] & ~md_ready;
 
   // ---- capabilities

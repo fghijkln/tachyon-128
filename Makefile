@@ -2,16 +2,19 @@
 PY ?= python3
 N  ?= 1000
 
-.PHONY: all build test tools unit programs random mutants synth clean
+.PHONY: all build test tools mulcheck unit programs random mutants synth clean
 all: build test synth
 
 build:
 	tb/build.sh
 
-test: tools unit programs random
+test: tools mulcheck unit programs random
 
 tools:
 	$(PY) tests/test_tools.py
+
+mulcheck:
+	bash tests/test_mul32x4.sh
 
 unit: build
 	$(PY) tests/run_tests.py unit
