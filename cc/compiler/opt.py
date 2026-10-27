@@ -924,24 +924,35 @@ def strength_reduce(code, vreg=None):
                 for d in code[k].defs():
                     if d is not None:
                         written.setdefault(d, []).append(k)
-            # induction variables: iv -> (step c, position of its in-loop definition)
+            def inv(r):
+                return r is not None and (r == ZERO or (r >= VREG0 and r not in written))
+
+            def step_of(i, iv):
+                """i = iv + step: ('c', n) for an immediate, ('r', R) for an invariant register."""
+                if i.op != "bin" or i.cc != "add":
+                    return None
+                if i.b is None:
+                    return ("c", sx(i.imm)) if (i.a == iv and i.imm is not None) else None
+                for x, y in ((i.a, i.b), (i.b, i.a)):
+                    if x == iv and y != iv and inv(y):
+                        return ("r", y)
+                return None
+            # induction variables: iv -> (step, position of its in-loop definition, is sext32 int)
             ivs = {}
             for iv, pos in written.items():
                 if iv < VREG0 or len(pos) != 1:
                     continue
                 i = code[pos[0]]
-                if i.op == "bin" and i.cc == "add" and i.a == iv and i.b is None and i.imm is not None:
-                    ivs[iv] = (sx(i.imm), pos[0])
-                elif i.op == "ext" and i.sign and i.sz == 32 and dc.get(i.a) == 1 and len(written.get(i.a, [])) == 1:
-                    j = code[written[i.a][0]]
-                    if j.op == "bin" and j.cc == "add" and j.a == iv and j.b is None and j.imm is not None \
-                            and written[i.a][0] < pos[0]:
-                        ivs[iv] = (sx(j.imm), pos[0])
+                st = step_of(i, iv)
+                if st is not None and st[0] == "c":
+                    ivs[iv] = (st, pos[0], False)
+                elif i.op == "ext" and i.sign and i.sz == 32 and dc.get(i.a) == 1 and len(written.get(i.a, [])) == 1 \
+                        and written[i.a][0] < pos[0]:
+                    st = step_of(code[written[i.a][0]], iv)
+                    if st is not None:
+                        ivs[iv] = (st, pos[0], True)
             if not ivs:
                 continue
-
-            def inv(r):
-                return r is not None and (r == ZERO or (r >= VREG0 and r not in written))
 
             aff = {}       # v -> (iv, scale: ('c', n) | ('r', R), def position)
             for k in range(h, t + 1):
@@ -963,21 +974,16 @@ def strength_reduce(code, vreg=None):
                             break
             if not aff:
                 continue
-            # reduce the affine values read by something other than the affine chain itself
-            chain_users = {}
-            for k in range(h, t + 1):
-                i = code[k]
-                for u in i.uses():
-                    if u in aff:
-                        chain_users.setdefault(u, set()).add(i.d in aff and code[aff[i.d][2]] is i)
-            outside = set()
+            users = {}
             for k, i in enumerate(code):
-                if not (h <= k <= t):
-                    for u in i.uses():
-                        if u in aff:
-                            outside.add(u)
-            pick = [v for v in aff if False in chain_users.get(v, set()) or v in outside]
-            # only worth it when the chain has a mul, or more than one op to replace
+                for u in i.uses():
+                    if u is not None:
+                        users.setdefault(u, []).append(k)
+            # reduce the affine values read by something other than the affine chain itself
+            def chain_only(v):
+                return all(code[k].d in aff and aff[code[k].d][2] == k for k in users.get(v, []))
+            pick = [v for v in aff if not chain_only(v)]
+
             def cost(v):
                 i = code[aff[v][2]]
                 c = 1
@@ -985,47 +991,125 @@ def strength_reduce(code, vreg=None):
                     if u in aff:
                         c += cost(u)
                 return c
-            pick = [v for v in pick if aff[v][1][0] == "r" or cost(v) >= 2][:SR_MAX]
+            pick = [v for v in pick if aff[v][1][0] == "r" or cost(v) >= 2]
+            # linear-function test replacement: a sext32 iv whose only other uses are loop-exit
+            # compares against invariants is replaced there by a reduced address p = B + iv*n (n > 0)
+            lftr = {}
+            widths = None
+            live_exit = None
+            for iv, (st, ivpos, is32) in ivs.items():
+                if not is32:
+                    continue
+                inc = written[code[ivpos].a][0]
+                addr = [v for v in aff if aff[v][0] == iv and aff[v][1][0] == "c" and aff[v][1][1] > 0
+                        and any((code[k].op == "ld" and code[k].a == v) or (code[k].op == "st" and code[k].b == v)
+                                for k in users.get(v, []))]
+                if not addr:
+                    continue
+                P = set(pick) | set(addr)
+
+                def covered(v):
+                    return v in P or (users.get(v) and all(code[k].d in aff and aff[code[k].d][2] == k
+                                                           and covered(code[k].d) for k in users[v]))
+                if live_exit is None:
+                    from .backend import build_blocks, liveness
+                    blocks = build_blocks(code)
+                    liveness(code, blocks)
+                    live_exit = 0
+                    for bl in blocks:
+                        if h <= bl.start <= t:
+                            for sb in bl.succ:
+                                if not (h <= sb.start <= t):
+                                    live_exit |= sb.live_in
+                if (live_exit >> (iv - VREG0)) & 1:
+                    continue
+                cmps = []
+                ok = True
+                for k in users.get(iv, []):
+                    i = code[k]
+                    if k == inc or not (h <= k <= t):
+                        continue
+                    if i.d in aff and aff[i.d][2] == k:
+                        if not covered(i.d):
+                            ok = False
+                        continue
+                    if i.op == "bcc" and h <= k <= t and i.cc in ("lt", "ge", "le", "gt", "eq", "ne") \
+                            and (i.a == iv) != (i.b == iv):
+                        other = i.b if i.a == iv else i.a
+                        if inv(other):
+                            if widths is None:
+                                widths = value_widths(code) or ({}, {})
+                            if other == ZERO or widths[1].get(other, 128) <= 64:
+                                cmps.append(k)
+                                continue
+                    ok = False
+                if ok and cmps and len(users.get(code[inc].d, [])) == 1:
+                    for v in addr:
+                        if v not in pick:
+                            pick.append(v)
+                    lftr[iv] = (addr[0], cmps, (inc, ivpos))
+            if len(pick) > SR_MAX:     # LFTR assumed every candidate above is reduced
+                pick, lftr = pick[:SR_MAX], {}
             if pick:
-                target = (h, t, ivs, aff, pick)
+                target = (h, t, ivs, aff, pick, lftr)
                 break
         if target is None:
             return code
-        h, t, ivs, aff, pick = target
+        h, t, ivs, aff, pick, lftr = target
         pre = []
         after = {}            # position -> instructions to insert after it
         repl = {}
+        preg = {}
+
+        def build(r, iv, x, memo):     # recompute r = f(iv) at iv = x, in the preheader
+            if r == iv:
+                return x
+            if r not in aff:
+                return r
+            if r in memo:
+                return memo[r]
+            i = code[aff[r][2]]
+            n = vreg()
+            pre.append(Ins("bin", d=n, a=build(i.a, iv, x, memo),
+                           b=build(i.b, iv, x, memo) if i.b is not None else None, imm=i.imm, cc=i.cc))
+            memo[r] = n
+            return n
         for v in pick:
             iv, scale, _ = aff[v]
-            c, ivpos = ivs[iv]
-            memo = {}
-
-            def build(r):     # recompute r = f(iv) in the preheader
-                if r == iv or r not in aff:
-                    return r
-                if r in memo:
-                    return memo[r]
-                i = code[aff[r][2]]
-                n = vreg()
-                pre.append(Ins("bin", d=n, a=build(i.a), b=build(i.b) if i.b is not None else None,
-                               imm=i.imm, cc=i.cc))
-                memo[r] = n
-                return n
+            st, ivpos, _ = ivs[iv]
             p = vreg()
-            pre.append(Ins("mov", d=p, a=build(v)))
-            if scale[0] == "c":
-                step = Ins("bin", d=p, a=p, imm=(c * scale[1]) & M128, cc="add")
-            elif c == 1:
-                step = Ins("bin", d=p, a=p, b=scale[1], cc="add")
+            preg[v] = p
+            pre.append(Ins("mov", d=p, a=build(v, iv, iv, {})))
+            if st[0] == "c" and scale[0] == "c":
+                step = Ins("bin", d=p, a=p, imm=(st[1] * scale[1]) & M128, cc="add")
+            elif st == ("c", 1) or scale == ("c", 1):
+                step = Ins("bin", d=p, a=p, b=scale[1] if st[0] == "c" else st[1], cc="add")
             else:
-                s = vreg()
-                pre.append(Ins("bin", d=s, a=scale[1], imm=c & M128, cc="mul"))
-                step = Ins("bin", d=p, a=p, b=s, cc="add")
+                s_ = vreg()
+                if st[0] == "c":
+                    pre.append(Ins("bin", d=s_, a=scale[1], imm=st[1] & M128, cc="mul"))
+                elif scale[0] == "c":
+                    pre.append(Ins("bin", d=s_, a=st[1], imm=scale[1] & M128, cc="mul"))
+                else:
+                    pre.append(Ins("bin", d=s_, a=st[1], b=scale[1], cc="mul"))
+                step = Ins("bin", d=p, a=p, b=s_, cc="add")
             after.setdefault(ivpos, []).append(step)
             repl[aff[v][2]] = Ins("mov", d=v, a=p)
+        drop = set()
+        for iv, (v, cmps, incs) in lftr.items():
+            drop.update(incs)     # the iv's own step is a dead cycle once nothing else reads it
+            for k in cmps:
+                i = code[k]
+                other = i.b if i.a == iv else i.a
+                pend = build(v, iv, other, {})
+                if i.a == iv:
+                    repl[k] = Ins("bcc", a=preg[v], b=pend, cc=i.cc, label=i.label)
+                else:
+                    repl[k] = Ins("bcc", a=pend, b=preg[v], cc=i.cc, label=i.label)
         body = []
         for k in range(h, t + 1):
-            body.append(repl.get(k, code[k]))
+            if k not in drop:
+                body.append(repl.get(k, code[k]))
             body.extend(after.get(k, []))
         code[:] = code[:h] + pre + body + code[t + 1:]
 
