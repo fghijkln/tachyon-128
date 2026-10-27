@@ -366,8 +366,23 @@ class Emitter:
         return base, off
 
     # ------------------------------------------------------------------
-    def emit(self):
+    def emit(self, sw_label=None):
         self.out.append(f"{self.name}:")
+        # v6 shrink-wrapping (shrinkwrap.py): prologue at sw_label, bare ret in the fast region
+        self.sw_label, self.sw_fast = None, ()
+        if sw_label is not None and (self.frame or self.saves) and not self.vacap:
+            from .shrinkwrap import check
+            fast = check(self.code, self.alloc, sw_label)
+            if fast is not None:
+                self.sw_label, self.sw_fast = sw_label, fast
+        if self.sw_label is None:
+            self.prologue()
+        for k, i in enumerate(self.code):
+            self.cur = k
+            getattr(self, "i_" + i.op)(i)
+        return self.out
+
+    def prologue(self):
         if self.frame:
             self.addi(SP, SP, -self.frame)
         for k, r in enumerate(self.saves):
@@ -379,9 +394,6 @@ class Emitter:
             self.e(f"addi {rn(SCR_D)}, {rn(SCR_D)}, 128")
             self.e(f"csetbnd {rn(SCR_A)}, {rn(SCR_A)}, {rn(SCR_D)}")
             self.mem("sq", SCR_A, SP, self.frame - 144)
-        for i in self.code:
-            getattr(self, "i_" + i.op)(i)
-        return self.out
 
     def epilogue(self):
         for k, r in enumerate(self.saves):
@@ -392,8 +404,13 @@ class Emitter:
 
     def i_label(self, i):
         self.out.append(f"{i.label}:")
+        if self.sw_label is not None and i.label == self.sw_label:
+            self.prologue()
 
     def i_ret(self, i):
+        if self.cur in self.sw_fast:
+            self.e("ret")
+            return
         self.epilogue()
 
     def i_br(self, i):

@@ -121,8 +121,10 @@ def canonical_for(ins, bits, sign):
 
 
 def optimize(code):
-    for _ in range(4):
+    for rnd in range(4):
         changed = False
+        if rnd == 0 and enabled("dupret"):
+            code, changed = dup_returns(code)
         dc = def_counts(code)
         single = {}
         for i in code:
@@ -337,6 +339,42 @@ def fold_bases(code):
                     i.a is not None and i.a >= VREG0 and i.a != d and not PURECAP:
                 eq[d] = (i.a, sx(i.imm))
     return did
+
+
+DUP_MAX = 4       # instructions (besides the ret) of a return block that may be copied
+DUP_SITES = 8     # copies per return block
+
+
+def dup_returns(code):
+    """v6 return-block duplication: `br L` to a short block `L: <= 4 simple ops; ret` becomes a
+    copy of that block, so each return path ends in its own ret (no jump to a shared exit; the
+    epilogue sinks into each path, which also lets shrink-wrapping give an early exit no frame)."""
+    import copy
+    label_pos = {i.label: k for k, i in enumerate(code) if i.op == "label"}
+    bodies = {}
+    for l, k in label_pos.items():
+        j = k + 1
+        while j < len(code) and code[j].op == "label":
+            j += 1
+        body = []
+        while j < len(code) and len(body) <= DUP_MAX and code[j].op in ("mov", "li", "bin", "ext", "la"):
+            body.append(code[j])
+            j += 1
+        if j < len(code) and code[j].op == "ret" and len(body) <= DUP_MAX:
+            bodies[l] = body + [code[j]]
+    if not bodies:
+        return code, False
+    out = []
+    count = {}
+    did = False
+    for i in code:
+        if i.op == "br" and i.label in bodies and count.get(i.label, 0) < DUP_SITES:
+            count[i.label] = count.get(i.label, 0) + 1
+            out.extend(copy.copy(x) for x in bodies[i.label])
+            did = True
+            continue
+        out.append(i)
+    return out, did
 
 
 def jump_cleanup(code):

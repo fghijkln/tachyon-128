@@ -5,7 +5,7 @@ import os
 import pickle
 import re
 
-from . import backend, inline, ir, opt
+from . import backend, inline, ir, opt, shrinkwrap
 from .lexer import CompileError
 from .parser import Parser
 from .preproc import Preprocessor
@@ -102,9 +102,12 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
                 code = opt.fuse_word_ops(opt.schedule_loads(opt.hoist_constants(opt.optimize(opt.local_cse(opt.optimize(code))))))
             else:
                 code = opt.jump_cleanup(code)
+            sw = None
+            if optimize and opt.enabled("shrinkwrap") and not fg.fn.va_save:
+                code, sw = shrinkwrap.prepare(code, o.asm_name)
             alloc = backend.allocate(code)
             em = backend.Emitter(fg, code, alloc, o.asm_name)
-            lines = em.emit()
+            lines = em.emit(sw)
             for tl, labels in fg.data:
                 lines.append("        .align 16")
                 lines.append(f"{tl}:")
