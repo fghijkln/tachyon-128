@@ -246,7 +246,9 @@ class FuncGen:
                 v = self.vreg()
                 self.emit("ld", d=v, a=INCOMING, imm=loc[1], sz=16, sign=False)
             if p in self.var_reg:
-                self.mov(self.var_reg[p], v)
+                i = self.emit("mov", d=self.var_reg[p], a=v)
+                if loc[0] == "reg" and p.ty.is_integer() and p.ty.size < 16:
+                    i.extra = ("parm", 8 * p.ty.size, not p.ty.unsigned)   # canonical per ABI (opt.value_widths)
             else:
                 off = self.local_off(p)
                 self.emit("st", a=v, b=FRAME, imm=off, sz=self.store_size(p.ty))

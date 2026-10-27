@@ -102,6 +102,8 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
                 code = opt.local_cse(opt.optimize(code))
                 if opt.enabled("rle"):
                     code = opt.redundant_loads(code)
+                if opt.enabled("vrange"):
+                    code = opt.optimize(opt.redundant_exts(code))
                 code = opt.hoist_constants(opt.optimize(code))
                 if opt.enabled("licm"):
                     code = opt.optimize(opt.hoist_invariants(code))

@@ -560,6 +560,143 @@ def demanded_bits(code):
     return did
 
 
+def _sbits(v):
+    """Smallest n with v == sext(low n bits of v) (v signed)."""
+    return (v.bit_length() if v >= 0 else (~v).bit_length()) + 1
+
+
+def value_widths(code):
+    """Per-vreg value ranges as bit widths: uw[r] = n means 0 <= r < 2**n (unsigned 128-bit view),
+    sw[r] = n means r is the sign extension of its low n bits.  A forward fixpoint over all
+    definitions (a vreg's width is the max over its defs); widths that keep growing jump to 128."""
+    uw, sw, bumps = {}, {}, {}
+
+    def U(r):
+        if r is None:
+            return 128
+        if r == ZERO:
+            return 0
+        return uw.get(r, 0) if r >= VREG0 else 128
+
+    def S(r):
+        if r is None:
+            return 128
+        if r == ZERO:
+            return 1
+        return sw.get(r, 1) if r >= VREG0 else 128
+
+    def widths(i):
+        op = i.op
+        if op == "li":
+            v = sx(i.imm & M128)
+            return (v.bit_length() if v >= 0 else 128), _sbits(v)
+        if op == "mov":
+            if isinstance(i.extra, tuple) and i.extra[0] == "parm":
+                b = i.extra[1]
+                return (128, b) if i.extra[2] else (b, b + 1)
+            return U(i.a), S(i.a)
+        if op == "ld":
+            b = 8 * i.sz
+            if b >= 128:
+                return 128, 128
+            return (b, b + 1) if not i.sign else (128, b)
+        if op == "ext":
+            if not i.sign:
+                u = min(i.sz, U(i.a))
+                return u, min(128, u + 1)
+            s = min(i.sz, S(i.a))
+            return (U(i.a) if U(i.a) < i.sz else 128), s
+        if op != "bin" or i.extra == "w32" and i.cc not in ("and", "or", "xor", "srl", "sra"):
+            return 128, 128
+        cc = i.cc
+        if i.b is None:
+            if i.imm is None:
+                return 128, 128
+            iv = sx(i.imm & M128)
+            ub, sb = (iv.bit_length() if iv >= 0 else 128), _sbits(iv)
+        else:
+            ub, sb = U(i.b), S(i.b)
+        ua, sa = U(i.a), S(i.a)
+        if cc == "and":
+            u = min(ua, ub)
+            return u, min(max(sa, sb), u + 1)
+        if cc in ("or", "xor"):
+            u = max(ua, ub)
+            return u, min(max(sa, sb), u + 1)
+        if cc == "add":
+            u = min(128, max(ua, ub) + 1)
+            return u, min(128, max(sa, sb) + 1, u + 1)
+        if cc == "sub":
+            return 128, min(128, max(sa, sb) + 1)
+        if cc == "mul":
+            u = min(128, ua + ub)
+            return u, min(128, sa + sb, u + 1)
+        if cc in ("slt", "sltu", "seq"):
+            return 1, 2
+        if i.b is None and cc in ("srl", "sra", "sll"):
+            k = i.imm & 127
+            if cc == "srl":
+                u = max(0, ua - k)
+                return u, min(128, u + 1)
+            if cc == "sra":
+                s = max(1, sa - k)
+                return (max(0, ua - k) if ua < 128 else 128), s
+            if k == 0:
+                return ua, sa
+            u = min(128, ua + k)
+            return u, min(128, sa + k, u + 1)
+        return 128, 128
+
+    for _ in range(64):
+        changed = False
+        for i in code:
+            if i.d is None or i.d < VREG0 or i.op in ("st", "bcc", "br", "jt", "label", "ret"):
+                continue
+            u, s = widths(i)
+            u, s = min(u, 128), min(s, 128)
+            ou, os_ = uw.get(i.d), sw.get(i.d)
+            nu = u if ou is None else max(ou, u)
+            ns = s if os_ is None else max(os_, s)
+            if (nu, ns) != (ou, os_):
+                if ou is not None:
+                    bumps[i.d] = bumps.get(i.d, 0) + 1
+                    if bumps[i.d] > 4:
+                        nu, ns = 128, 128
+                uw[i.d], sw[i.d] = nu, ns
+                changed = True
+        if not changed:
+            return uw, sw
+    return None
+
+
+def redundant_exts(code):
+    """v6 value-range extension elimination: an `ext` (or an `and` with a low-bit mask) whose
+    operand is already known to fit becomes a mov.  Default (non-purecap) code only."""
+    if PURECAP:
+        return code
+    r = value_widths(code)
+    if r is None:
+        return code
+    uw, sw = r
+
+    def U(x):
+        return 0 if x == ZERO else (uw.get(x, 0) if x is not None and x >= VREG0 else 128)
+
+    def S(x):
+        return 1 if x == ZERO else (sw.get(x, 1) if x is not None and x >= VREG0 else 128)
+
+    for k, i in enumerate(code):
+        if i.d is None or i.a is None:
+            continue
+        if i.op == "ext" and ((not i.sign and U(i.a) <= i.sz) or (i.sign and S(i.a) <= i.sz)):
+            code[k] = Ins("mov", d=i.d, a=i.a)
+        elif i.op == "bin" and i.cc == "and" and i.b is None and i.imm is not None:
+            m = i.imm & M128
+            if m and (m & (m + 1)) == 0 and U(i.a) <= m.bit_length():
+                code[k] = Ins("mov", d=i.d, a=i.a)
+    return code
+
+
 def hoist_constants(code):
     """Loop-invariant constant hoisting: single-definition `li`/`la` temporaries inside a loop
     move to just before the loop header, and identical constants in one loop share one vreg.
