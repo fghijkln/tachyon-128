@@ -1666,6 +1666,8 @@ class Parser:
             error_at(name, f"no member named '{name.text}'")
         for m in path:
             ty = m.ty
+            if m.bit_width is not None and ty.is_integer() and ty.unsigned and m.bit_width < 32 and ty.size <= 4:
+                ty = INT     # an unsigned bit-field narrower than int promotes to int
             if e.ty.const:
                 ty = T.qualified(ty, const=True)
             e = Node("member", t, ty=ty, lhs=e, mem=m)
