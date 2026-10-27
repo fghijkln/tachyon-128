@@ -104,7 +104,7 @@ staples, and `tx128.h` (MMIO console, cycle/instret counters, `tx_put_u128`/`tx_
 |---|---|---|
 | C tests (`cc/tests/c`, reference output from host gcc) | `python3 cc/tests/run_tests.py --both` | 86 programs × {`-O`, `-O0`} = 172/172 |
 | differential fuzzing (random UB-free programs, `randprog.py`) | `python3 cc/tests/fuzz.py N [SEED] [-O0]` | see below |
-| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 94/94 (`-O`), 94/94 (`-O0`) |
+| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 96/96 (`-O`), 96/96 (`-O0`) |
 | benchmarks (golden + RTL, commit-trace checked) | `python3 cc/bench/run_bench.py [--rtl] [--both] [--purecap]` | 6/6 |
 
 `gen_expected.py` regenerates `cc/tests/expected/*.out` with the host compiler
@@ -179,6 +179,8 @@ the trap handler prints the cause and faulting address, exit code 128 + cause):
 | 006_forged_pointer | dereference a pointer rebuilt from its integer address | cause 9 (untagged access in user mode) |
 | 007_use_after_bounds | write `arr[-1]` (underflow) | cause 3 |
 | 008_subobject_overflow | copy 10 bytes into an 8-byte member array (would overwrite the next field) | cause 3 |
+| 009_va_overread | `va_arg` past the arguments actually passed (9 claimed, 2 passed) | cause 3 |
+| 010_stack_exhaustion | unbounded recursion reaches the bottom of the 128 KiB stack region | cause 3 |
 
 Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** — all 86 normal C tests pass
 unmodified in purecap mode (none excluded) plus the 7 fault tests; every purecap test also matches the
@@ -219,6 +221,15 @@ used by the test scripts). Exact rules: [`ABI.md`](ABI.md) §8.1.
   from a member to its enclosing struct now traps; `073_ptr_arith_struct` does exactly that, so its
   purecap expectation (`cc/tests/expected/073_ptr_arith_struct.out.purecap`) is the cause-3 trap, and
   it passes unchanged with `-fno-subobject-bounds`. Test: `purecap/008_subobject_overflow`.
+* **Bounded stack** (`-fno-stack-bounds` / `TCC128_NO_STACK=1`): `sp` is a capability for the
+  128 KiB stack region `[0x20000, 0x40000)` only (was all of RAM), so stack exhaustion traps at the
+  region's bottom instead of overwriting the heap, and no stack-derived pointer reaches globals or
+  the heap; the purecap heap is limited to below the region. **va_list bounds**: the caller of a
+  variadic function passes its stack-argument byte count in scratch `r62`, and the callee bounds its
+  va_list to exactly the passed arguments, so a format/argument mismatch traps instead of reading
+  the caller's frame. Tests: `purecap/009_va_overread`, `purecap/010_stack_exhaustion`.
+  Per-frame narrowing of `sp` itself is deliberately not done (every escaping stack pointer is
+  already bounded to its object; see `ABI.md` §8.1).
 
 ## Limitations
 

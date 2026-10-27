@@ -129,7 +129,8 @@ same data model, register roles and frame layout (pointers were already 16 bytes
 a tagged capability and every memory access goes through one:
 
 * **Roots** (`cc/lib/crt0_purecap.s`): `gp` = RAM capability `[0, 256 KiB)` derived from `rc` with
-  `PERM_ALL & ~(EXEC|SEAL|UNSEAL|CINVOKE)` (0x59B); `sp` = `gp` with its cursor at the top of RAM; the
+  `PERM_ALL & ~(EXEC|SEAL|UNSEAL|CINVOKE)` (0x59B); `sp` = the stack-region capability `[0x20000, 0x40000)`
+  with its cursor at the top of RAM (v6, §8.1; whole-RAM `gp` under `-fno-stack-bounds`); the
   PCC is narrowed to the code image `[0, __end)` with EXEC|LOAD|LOAD_CAP|GLOBAL. `__tx_mmio` holds a
   capability for the 64 KiB MMIO page (`tx128.h` builds `TX_CONSOLE`/`TX_EXIT`/... from it).
 * **User mode, empty untagged window**: crt0 sets `ubase = ubound = 0` and enters `main` with `eret`
@@ -151,7 +152,7 @@ a tagged capability and every memory access goes through one:
   `length_get(p)`, `base_get(p)`, `perms_get(p)`.
 * **Faults**: `tvec = __tx_trap` prints `*** capability trap (hardware): cause=N <tval>` and exits
   with `128 + cause` (3 = bounds, 4 = permission, 9 = untagged access in user mode).
-* **Hardening** (v6, §8.1): sub-object bounds.
+* **Hardening** (v6, §8.1): sub-object bounds, bounded stack region, va_list bounds.
 
 ### 8.1 Purecap hardening (v6)
 
@@ -165,3 +166,25 @@ array is addressed directly from the enclosing object (no `csetbnd`, it cannot g
 Consequences: indexing a member array out of range traps (cause 3) even when the access would land
 inside the enclosing struct, and `container_of` (stepping back from a member pointer to the struct)
 traps; code that needs it is compiled with `-fno-subobject-bounds`.
+
+**Bounded stack** (default; `-fno-stack-bounds` / `TCC128_NO_STACK=1` turns it off).
+
+* *Stack region*: crt0 derives `sp` as a capability for exactly `[RAM_TOP − 128 KiB, RAM_TOP)` =
+  `[0x20000, 0x40000)` instead of the whole-RAM `gp`. Every stack-derived capability (frame objects,
+  spill/save slots, va_list) is therefore confined to the stack: runaway recursion traps (cause 3) at
+  the bottom of the region instead of running into the heap, and no stack pointer can reach a global
+  or a heap block. The purecap allocator keeps the heap below `RAM_TOP − 128 KiB` (default mode:
+  16 KiB reserve, unchanged). The linker removes the crt0 block under `-fno-stack-bounds`.
+* *va_list bounds*: a call to a variadic (or unprototyped) function sets compiler-scratch `r62` to
+  the number of stack-argument bytes it passes (`16 × (nargs − 8)`, or 0) right before the `call`/`jalr`.
+  The variadic callee's prologue builds a capability for `[save area, incoming sp + r62)` — the 128-byte
+  `a0..a7` save area plus exactly the caller's stack arguments — and keeps it in a 16-byte frame slot
+  directly below the save area (the variadic frame grows from 128 to 144 bytes); `va_start` is a cursor
+  into it. Reading more arguments than were passed (a format/argument mismatch) traps (cause 3) instead
+  of walking into the caller's frame. Calling a variadic function through a non-variadic prototype
+  is undefined behaviour in C and leaves `r62` unset (the bounds are then garbage and normally trap).
+* *Per-frame `sp` narrowing* (top of `sp` lowered to the frame on every entry) is **not** done: every
+  stack pointer that can leave compiler-generated code (`&local`, arrays, struct-argument copies,
+  `sret` buffers, va_list) already carries the exact bounds of its object, so narrowing `sp` itself
+  would only guard the compiler's own fixed-offset accesses, at the price of saving/restoring `sp`
+  around every call (CHERI-RISC-V purecap ABIs likewise bound the stack region, not each frame).

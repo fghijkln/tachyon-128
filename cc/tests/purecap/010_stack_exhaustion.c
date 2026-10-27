@@ -1,4 +1,4 @@
-/* -mpurecap bounded stack: the stack capability spans only [RAM_TOP - 64 KiB, RAM_TOP), so runaway
+/* -mpurecap bounded stack: the stack capability spans only [RAM_TOP - 128 KiB, RAM_TOP), so runaway
    recursion traps (cause 3) when it reaches the bottom of the stack region instead of silently
    running into the heap below it. */
 #include <stdio.h>

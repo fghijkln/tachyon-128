@@ -3,6 +3,10 @@ depth 0
 depth 64
 depth 128
 depth 192
+depth 256
+depth 320
+depth 384
+depth 448
 
 *** capability trap (hardware): cause=3 <A>
 
