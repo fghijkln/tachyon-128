@@ -185,6 +185,17 @@ class Assembler:
                 return [enc_r(OP_SIMD, R(ops[0]), R(ops[1]), 0, func)]
             need(3)
             return [enc_r(OP_SIMD, R(ops[0]), R(ops[1]), R(ops[2]), func)]
+        if mn in AMO_FUNCS:
+            def amo_addr(s):
+                off, reg = self.mem_operand(s, final)
+                if off:
+                    raise AsmError("atomics take no offset: use (rs1)")
+                return reg
+            if mn == "lr":
+                need(2)
+                return [enc_r(OP_AMO, R(ops[0]), amo_addr(ops[1]), 0, 0)]
+            need(3)
+            return [enc_r(OP_AMO, R(ops[0]), amo_addr(ops[2]), R(ops[1]), AMO_FUNCS.index(mn))]
         if mn in CAP_RD_ONLY:
             need(1)
             return [enc_r(OP_CAP, R(ops[0]), 0, 0, CAP_FUNCS.index(mn))]

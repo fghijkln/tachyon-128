@@ -33,6 +33,8 @@ def decode(w):
         return ("v", SIMD_FUNCS[sop] + "." + _INV_LANE[lw])
     if op == OP_CAP:
         return ("r", CAP_FUNCS[func]) if func < len(CAP_FUNCS) else None
+    if op == OP_AMO:
+        return ("amo", AMO_FUNCS[func]) if func < len(AMO_FUNCS) else None
     if op in _INV_I:
         return ("i", _INV_I[op])
     if op == OP_WIDE:
@@ -77,6 +79,8 @@ def disasm(w, pc=0):
         if base in ALU_UNARY or base in SIMD_UNARY or base in CAP_UNARY:
             return f"{mn} {rd}, {rs1}"
         return f"{mn} {rd}, {rs1}, {rs2}"
+    if kind == "amo":
+        return f"lr {rd}, ({rs1})" if mn == "lr" else f"{mn} {rd}, {rs2}, ({rs1})"
     if kind == "i":
         imm = f["uimm14"] if mn == "csetbndi" else (f["uimm14"] & 127 if mn in ("slli", "srli", "srai") else f["imm14"])
         return f"{mn} {rd}, {rs1}, {imm}"

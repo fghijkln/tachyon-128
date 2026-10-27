@@ -27,6 +27,7 @@
 - **异常**：非法指令、能力错误（tag/边界/权限/密封）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
 - **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
+- **v4 原子操作**：128 位 `lr`/`sc`（单核语义，任何存储或陷入都会清除保留）以及 `amoswap/amoadd/amoand/amoor/amoxor`；`lr`/`sc`/`amoswap` 遵循 `clc`/`csc` 的标签规则，可原子地交换能力。
 - **v4 微架构**：8 项返回地址栈（RAS，推测更新 + 提交副本在陷入时恢复）预测 `call`/`ret`；乘法器面积缩小——标量乘法的 128×32 部分积阵列与 SIMD `vmul` 共享一块“可拆分”的 4×(32×32) radix-4 Booth 乘法阵列（仍为 6 周期）。
 - **实现**：Python 汇编器/反汇编器/黄金参考模拟器；SystemVerilog 五级流水线（前递、load-use 互锁、v3 BTB + 2 位计数器分支预测、v3 4 遍 6 周期乘法器、radix-4 除法器，带结果缓存），用 Verilator 与黄金模型逐条提交轨迹对比验证，用 Yosys 综合统计单元数。
 
@@ -110,6 +111,7 @@ At reset all registers read as zero and untagged, except `rc` (r63), which holds
 | 0x02 | MULDIV (§4.2) | R |
 | 0x03 | SIMD (func8 = sop<<2 \| lane, §5.2) | R |
 | 0x04 | CAP (§5.1) | R |
+| 0x05 | AMO (v4 atomics, §4.6): `lr sc amoswap amoadd amoand amoor amoxor` | R |
 | 0x08–0x10 | `addi andi ori xori slti sltiu slli srli srai` | I |
 | 0x11 | `cincaddri` | I |
 | 0x12 | `csetbndi` (imm is **unsigned** 14-bit length) | I |
@@ -214,6 +216,42 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 | `status` | 5 | bit0 **IE** (global interrupt enable), bit1 **PIE** (IE before the last trap), bit2 **TIE** (timer interrupt enable), **v3:** bit3 **U** (current mode is user; read-only to `csrw`), bit4 **PU** (mode before the last trap was user); other bits read 0, writes to them are ignored |
 | `ubase` | 6 | **v3:** lowest address user mode may reach through an untagged base (§6.2) |
 | `ubound` | 7 | **v3:** end (exclusive) of the user window for untagged accesses (§6.2) |
+
+### 4.6 Atomics (v4, op 0x05)
+
+128-bit atomic memory operations for a single hart (the reference machine has one core, so "atomic" means
+indivisible with respect to interrupts and traps). R-type: `rd`, `rs1` = address (no offset), `rs2` = data.
+
+| func | Mnemonic | Semantics |
+|---|---|---|
+| 0 | `lr rd, (rs1)` | load-reserved: `rd` ← the 16-byte granule at `rs1`, **with `clc` tag rules** (tag kept only if the authority is untagged or has LOAD_CAP; LOAD_MUTABLE attenuation, §5.1.5); sets the reservation to that granule |
+| 1 | `sc rd, rs2, (rs1)` | store-conditional: if the reservation is valid and names this granule, store `rs2` **with `csc` tag rules** and `rd ← 0`; otherwise no store and `rd ← 1`. The reservation is cleared either way |
+| 2 | `amoswap rd, rs2, (rs1)` | `rd` ← old granule (clc tag rules), granule ← `rs2` (csc tag rules): an atomic **capability** exchange |
+| 3–6 | `amoadd / amoand / amoor / amoxor rd, rs2, (rs1)` | `rd` ← old value (untagged), granule ← old op `rs2.value`; a data write, so the granule's tag is cleared |
+| ≥7 | — | illegal |
+
+* **Access checks** (first failing raises, `tval = ea`): sealed base → *cap-sealed*; tagged base lacking the needed
+  permissions → *cap-permission* (`lr`: LOAD; `sc`: STORE; `amoswap` and arithmetic: LOAD **and** STORE); `sc`/`amoswap`
+  of a tagged `rs2` without STORE_CAP, or of a local `rs2` without STORE_LOCAL (§5.1.6) → *cap-permission*; bounds →
+  *cap-bounds*; user-mode untagged base outside `[ubase, ubound)` → *privilege-violation*; `ea mod 16 ≠ 0` →
+  *misaligned*; `ea` not in RAM → *access-fault* (atomics are **RAM-only**: the MMIO page faults too).
+  `sc` performs every check before it looks at the reservation, so a faulting `sc` traps (and the trap clears the
+  reservation) even when it would have failed.
+* **Reservation:** one per hart, `{valid, granule}`. Set by a successful `lr`; cleared by **every** completed store
+  (`sb … sq`, `csc`, `sc` successful or not, any AMO, stores to MMIO included) and by **every trap or interrupt**. Loads,
+  CSR accesses and `eret` leave it alone. Clearing on any store (not only to the reserved granule) and on every trap
+  keeps the rule simple and deterministic, and guarantees that an `lr`/`sc` pair separated by a preemption fails, so
+  the usual retry loop is correct across context switches without a dummy `sc` in the kernel.
+* `rd = rs2` is allowed (`amoswap r6, r6, (r5)` exchanges a register with memory); with `rd = r0` the memory side
+  effect still happens.
+
+```
+spin:  lr    t0, (a0)          # 128-bit counter or capability slot
+       addi  t0, t0, 1
+       sc    t1, t0, (a0)
+       bnez  t1, spin
+       amoswap t2, s1, (a1)    # atomically publish capability s1, get the old one back (tags preserved)
+```
 
 ## 5. Distinguishing features
 
@@ -468,7 +506,7 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 | 3 | capability-bounds | out-of-bounds access through a capability; non-monotonic `csetbnd(i)` |
 | 4 | capability-permission | load/store through a capability lacking LOAD/STORE; `csc` of a tagged value through a capability lacking STORE_CAP, **v4:** of a local value through one lacking STORE_LOCAL; `cinvoke` without PERMIT_CINVOKE |
 | 5 | misaligned | access not naturally aligned |
-| 6 | access-fault | data access outside RAM and MMIO; instruction fetch outside RAM (`tval` = pc) |
+| 6 | access-fault | data access outside RAM and MMIO; **v4:** an atomic outside RAM (MMIO included); instruction fetch outside RAM (`tval` = pc) |
 | 7 | capability-sealed | use or modification of a sealed capability; `cseal` of a sealed one; `cunseal` of an unsealed one, a sentry, or with the wrong otype; `cjalr` through a non-sentry sealed capability; `cinvoke` operand checks (§5.1.4) |
 | 8 | environment-call | `ecall` (`tval` = 0) |
 | 9 | privilege-violation | user mode: privileged instruction (`tval` = instruction word), untagged-base access outside `[ubase, ubound)` (`tval` = ea) |
@@ -557,6 +595,7 @@ label:  op operands      # comment   (';' also starts a comment)
 * Registers: `r0..r63` or ABI names. Immediates: C-like expressions over integers, labels and `.equ`
   symbols (`+ - * / % << >> & | ^ ~`, char literals `'A'`).
 * Directives: `.org .align .space .equ/.set .byte .half .word .dword .quad .ascii .asciz .include`.
+* Atomics (v4): `lr rd, (rs1)`, `sc rd, rs2, (rs1)`, `amoadd rd, rs2, (rs1)` (no offset allowed).
 * Pseudo-ops: `nop li la mv cmove not neg seqz snez j call ret jr beqz bnez bltz bgez bgtz blez bgt ble bgtu bleu`,
   `halt` (no operand = `halt zero`), `jal label` (= `jal ra, label`).
 
@@ -568,7 +607,8 @@ label:  op operands      # comment   (';' also starts a comment)
   (`csetepcc`), so a kernel tracks each task's PCC itself; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
 * One interrupt source (the deterministic machine timer); no external/software interrupts, no wall-clock time base.
-* No FPU, no atomics, no fence for self-modifying code.
+* No FPU, no fence for self-modifying code. Atomics (§4.6) are single-hart only: no multi-core coherence, the
+  reservation is cleared conservatively on any store or trap, and there are no AMO min/max or sub-word atomics.
 
 ## 10. Reference implementation notes (non-architectural)
 

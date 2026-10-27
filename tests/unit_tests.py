@@ -1122,6 +1122,171 @@ meth:   lq r32, 0(r20)
         sq r32, 0(r20)
 mend2:  cjalr r0, r1
 """ + handler + DATA
+    # ---------------- v4: atomics
+    body = ["        la r5, data"]
+    r = random.Random(950)
+    for k in range(10):
+        x, y = r.choice(VALS), r.choice(VALS)
+        fn = ["amoadd", "amoand", "amoor", "amoxor", "amoswap"][k % 5]
+        off = 16 * (k % 4)
+        body.append(f"        li r6, {x}\n        li r7, {y}\n        sq r6, {off}(r5)\n        addi r8, r5, {off}")
+        body.append(f"        {fn} r{10 + k}, r7, (r8)\n        lq r{30 + k}, {off}(r5)")
+    body.append("        li r6, 77\n        amoswap r6, r6, (r5)      # rd == rs2: old value out, register value in")
+    body.append("        amoadd r0, r6, (r5)        # rd = r0: memory still updated\n        lq r40, 0(r5)")
+    body.append("        amoadd r5, r6, (r5)        # rd == rs1\n        la r5, data\n        lq r41, 0(r5)")
+    T["amo_ops"] = PRE + "\n".join(body) + "\n" + POST + DATA
+    T["amo_lrsc"] = PRE + setup + """
+        li r6, 100
+        sq r6, 0(r5)
+        lr r7, (r5)
+        addi r7, r7, 1
+        sc r8, r7, (r5)          # success: 0
+        sc r9, r7, (r5)          # reservation consumed: 1
+        lr r10, (r5)
+        sq r0, 64(r5)            # any store clears the reservation (even to another granule)
+        sc r11, r7, (r5)         # 1
+        lr r12, (r5)
+        addi r13, r5, 16
+        sc r14, r7, (r13)        # different granule: 1, no store
+        lr r15, (r13)
+        lr r16, (r5)             # a second lr moves the reservation
+        sc r17, r7, (r13)        # 1
+        lr r18, (r5)
+        ecall                    # a trap clears the reservation
+        sc r19, r7, (r5)         # 1
+        lr r20, (r5)
+        amoadd r21, r7, (r13)    # an AMO is a store: clears it
+        sc r22, r7, (r5)         # 1
+        lr r23, (r5)
+        lq r24, 0(r5)            # loads do not
+        csrr r25, scratch        # neither do CSR reads
+        sc r26, r7, (r5)         # 0
+        li r30, 10               # lr/sc increment loop
+spin:   lr r31, (r5)
+        addi r31, r31, 3
+        sc r32, r31, (r5)
+        bnez r32, spin
+        addi r30, r30, -1
+        bnez r30, spin
+        lq r33, 0(r5)
+        lr r34, (r5)
+        sc r35, r34, (r5)
+        sc r36, r34, (r5)        # back-to-back: second fails
+""" + POST + handler + DATA
+    T["amo_faults"] = PRE + setup + """
+        addi r6, r5, 8
+        lr r10, (r6)             # misaligned -> 5
+        amoadd r11, r6, (r6)     # misaligned -> 5
+        li r7, -0x10000
+        lr r12, (r7)             # MMIO -> access fault (atomics are RAM-only)
+        sc r13, r7, (r7)         # -> 6
+        li r7, 0x40000
+        amoswap r14, r7, (r7)    # past RAM -> 6
+        li r8, 64
+        csetaddr r20, rc, r5
+        csetbnd r20, r20, r8     # [data, data+64)
+        li r8, 0x7FD             # no STORE
+        candperm r21, r20, r8
+        lr r15, (r21)            # fine (LOAD)
+        sc r16, r8, (r21)        # -> 4
+        amoadd r17, r8, (r21)    # -> 4 (needs LOAD and STORE)
+        li r8, 0x7FE             # no LOAD
+        candperm r22, r20, r8
+        lr r18, (r22)            # -> 4
+        sc r19, r8, (r22)        # store-only authority: sc allowed (no reservation -> 1)
+        amoswap r23, r8, (r22)   # -> 4
+        addi r9, r5, 64
+        csetaddr r24, r20, r9
+        amoor r25, r8, (r24)     # one past the end -> 3
+        li r8, 0x60
+        candperm r26, rc, r8
+        li r8, 3
+        csetaddr r26, r26, r8
+        cseal r27, r20, r26
+        amoxor r28, r8, (r27)    # sealed base -> 7
+        lr r29, (r5)
+        sc r30, r8, (r21)        # faulting sc (no STORE): trap, and the trap clears the reservation
+        sc r31, r8, (r5)         # 1
+        .word 0x07000005         # OP_AMO func 7: illegal
+""" + POST + handler + DATA
+    T["amo_caps"] = PRE + setup + """
+        li r8, 64
+        csetaddr r20, rc, r5
+        csetbnd r20, r20, r8     # all perms
+        csc r20, 0(r5)
+        amoswap r10, r20, (r5)   # capability swap: old cap out (tagged), new cap in
+        cgettag r11, r10
+        lr r12, (r5)             # lr returns the tagged cap (clc rules)
+        cgettag r13, r12
+        csetaddr r14, r12, r5
+        cincaddri r14, r14, 16
+        sc r15, r14, (r5)        # sc stores a capability (tag kept)
+        clc r16, 0(r5)
+        cgetbase r17, r16
+        li r8, 0x7F7             # no LOAD_CAP: the old value comes back untagged
+        candperm r21, r20, r8
+        amoswap r18, r20, (r21)
+        cgettag r19, r18
+        li r8, 0x7EF             # no STORE_CAP: swapping a cap in -> 4
+        candperm r22, r20, r8
+        amoswap r23, r20, (r22)
+        amoswap r24, r8, (r22)   # swapping an integer in is fine (granule tag cleared)
+        clc r25, 0(r5)
+        cgettag r26, r25
+        csc r20, 0(r5)
+        li r8, 0x6FF             # no LOAD_MUTABLE: old cap attenuated
+        candperm r27, r20, r8
+        amoswap r28, r20, (r27)
+        cgetperm r29, r28
+        lr r30, (r27)
+        cgetperm r31, r30
+        li r8, 0x77F
+        candperm r32, r20, r8    # local cap
+        li r8, 0x3FF
+        candperm r33, r20, r8    # authority without STORE_LOCAL
+        amoswap r34, r32, (r33)  # -> 4
+        lr r35, (r33)
+        sc r36, r32, (r33)       # -> 4 (checks come before the reservation test)
+        sc r37, r32, (r20)       # reservation was cleared by the trap: 1
+        lr r38, (r20)
+        sc r39, r32, (r20)       # STORE_LOCAL authority: 0, local cap stored
+        clc r40, 0(r5)
+        cgetperm r41, r40
+        amoadd r42, r8, (r5)     # arithmetic on a tagged granule: old value untagged, tag cleared
+        cgettag r43, r42
+        clc r44, 0(r5)
+        cgettag r45, r44
+        amoor r46, r20, (r5)     # a tagged rs2 is used as data only: the granule stays untagged
+        clc r47, 0(r5)
+        cgettag r48, r47
+""" + POST + handler + DATA
+    T["amo_hazards"] = PRE + setup + """
+        li r6, 5
+        sq r6, 0(r5)
+        lr r7, (r5)
+        addi r8, r7, 1           # load-use on lr
+        sc r9, r8, (r5)
+        beqz r9, ok1             # sc result consumed by the next instruction
+        addi r40, r40, 1
+ok1:    amoadd r10, r8, (r5)
+        add r11, r10, r10        # load-use on amoadd
+        amoadd r12, r11, (r5)    # back-to-back AMOs on one address
+        amoswap r13, r12, (r5)
+        lq r14, 0(r5)            # load right after an AMO
+        sq r14, 16(r5)
+        addi r15, r5, 16
+        lr r16, (r15)            # store then lr of the same granule
+        add r17, r16, r16
+        sc r18, r17, (r15)       # data forwarded from the previous instruction
+        lq r19, 16(r5)
+        amoxor r20, r19, (r15)
+        amoxor r21, r20, (r15)
+        lq r22, 16(r5)
+        li r23, -1
+        amoadd r24, r23, (r15)   # 128-bit wraparound
+        amoadd r25, r23, (r15)
+        lq r26, 16(r5)
+""" + POST + handler + DATA
     # ---------------- v3: user / supervisor privilege
     phandler = """
 phandler: csrr r50, cause

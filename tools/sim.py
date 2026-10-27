@@ -115,6 +115,7 @@ class Machine:
         self.retired = 0
         self.halted = None          # ('exit', code) | ('trap', cause)
         self.exit_code = 0
+        self.resv = None            # v4: lr/sc reservation (granule index) or None
 
     @property
     def user(self):
@@ -130,13 +131,15 @@ class Machine:
         return rd
 
     # ---------------------------------------------------------------- memory
-    def check_access(self, rs1, ea, size, is_store, store_cap=False, store_local=False):
+    def check_access(self, rs1, ea, size, is_store, store_cap=False, store_local=False, rmw=False, ram_only=False):
         if self.tag[rs1]:
             perm, base, top, otype = self.meta[rs1]
             if otype:
                 raise Trap(CAUSE_CAP_SEALED, ea)
             need = PERM_STORE if is_store else PERM_LOAD
-            if not perm & need:
+            if rmw:
+                need = PERM_LOAD | PERM_STORE       # v4 AMOs read and write
+            if perm & need != need:
                 raise Trap(CAUSE_CAP_PERM, ea)
             if store_cap and not perm & PERM_STORE_CAP:
                 raise Trap(CAUSE_CAP_PERM, ea)
@@ -150,7 +153,7 @@ class Machine:
             raise Trap(CAUSE_ALIGN, ea)
         if ea + size <= len(self.ram):
             return "ram"
-        if ea >= MMIO_BASE:
+        if ea >= MMIO_BASE and not ram_only:      # v4: atomics are RAM-only
             return "mmio"
         raise Trap(CAUSE_ACCESS, ea)
 
@@ -177,6 +180,7 @@ class Machine:
 
     def store(self, rs1, ea, size, v):
         kind = self.check_access(rs1, ea, size, True)
+        self.resv = None                       # v4: every completed store clears the reservation
         v &= (1 << (8 * size)) - 1
         if kind == "mmio":
             if ea == MMIO_CONSOLE:
@@ -191,9 +195,10 @@ class Machine:
         self.ram[ea:ea + size] = v.to_bytes(size, "little")
         self.mtag.pop(ea // GRANULE, None)     # any data store clears the granule's tag
 
-    def load_cap(self, rs1, ea):
-        """clc: 128-bit value + tag/metadata from the shadow memory. Returns (value, tag, meta)."""
-        kind = self.check_access(rs1, ea, 16, False)
+    def load_cap(self, rs1, ea, checked=False):
+        """clc: 128-bit value + tag/metadata from the shadow memory. Returns (value, tag, meta).
+        checked=True: the caller (lr / amoswap) already did the access checks (RAM only)."""
+        kind = "ram" if checked else self.check_access(rs1, ea, 16, False)
         if kind == "mmio":
             return self.mmio_word(ea), 0, NULL_META
         v = int.from_bytes(self.ram[ea:ea + 16], "little")
@@ -205,16 +210,20 @@ class Machine:
             return v, 1, (p, b, t, o)
         return v, 0, NULL_META
 
-    def store_cap(self, rs1, ea, A):
-        """csc: store register A's value and (if tagged) its capability metadata."""
-        kind = self.check_access(rs1, ea, 16, True, store_cap=bool(self.tag[A]),
-                                 store_local=bool(self.tag[A]) and not self.meta[A][0] & PERM_GLOBAL)
+    def store_cap(self, rs1, ea, A, checked=False, val=None, tag=None, meta=None):
+        """csc: store register A's value and (if tagged) its capability metadata.
+        checked=True (sc / amoswap): checks already done; val/tag/meta give the data (A may be overwritten)."""
+        if val is None:
+            val, tag, meta = self.val[A], self.tag[A], self.meta[A]
+        kind = "ram" if checked else self.check_access(rs1, ea, 16, True, store_cap=bool(tag),
+                                                       store_local=bool(tag) and not meta[0] & PERM_GLOBAL)
+        self.resv = None
         if kind == "mmio":
             self.store(rs1, ea, 16, self.val[A])
             return
-        self.ram[ea:ea + 16] = self.val[A].to_bytes(16, "little")
-        if self.tag[A]:
-            self.mtag[ea // GRANULE] = self.meta[A]
+        self.ram[ea:ea + 16] = val.to_bytes(16, "little")
+        if tag:
+            self.mtag[ea // GRANULE] = meta
         else:
             self.mtag.pop(ea // GRANULE, None)
 
@@ -332,6 +341,10 @@ class Machine:
                 wrote = self.seal_op(fn, rd, rs1, rs2)
             else:
                 wrote = self.cap_op(fn, rd, rs1, x2)
+        elif op == OP_AMO:
+            if func >= len(AMO_FUNCS):
+                raise Trap(CAUSE_ILLEGAL, w)
+            wrote = self.amo(AMO_FUNCS[func], rd, rs1, rs2)
         elif op in I_OPS.values():
             imm = f["imm14"]
             ui = imm & MASK
@@ -415,6 +428,37 @@ class Machine:
             raise Trap(CAUSE_ILLEGAL, w)
         return pc, npc, wrote
 
+    def amo(self, fn, rd, rs1, rs2):
+        """v4 atomics: 128-bit, 16-byte aligned, RAM only; address = rs1 (no offset)."""
+        ea = self.val[rs1]
+        g = ea // GRANULE
+        d_val, d_tag, d_meta = self.val[rs2], self.tag[rs2], self.meta[rs2]      # read before rd is written
+        capst = fn in ("sc", "amoswap")
+        local = bool(d_tag) and not d_meta[0] & PERM_GLOBAL
+        if fn == "lr":
+            self.check_access(rs1, ea, 16, False, ram_only=True)
+            v, t, m = self.load_cap(rs1, ea, checked=True)
+            self.resv = g
+            return self.rd_write(rd, v, t, m)
+        self.check_access(rs1, ea, 16, True, store_cap=capst and bool(d_tag), store_local=capst and local,
+                          rmw=fn != "sc", ram_only=True)
+        if fn == "sc":
+            ok = self.resv == g
+            self.resv = None
+            if ok:
+                self.store_cap(rs1, ea, rs2, checked=True, val=d_val, tag=d_tag, meta=d_meta)
+            return self.rd_write(rd, 0 if ok else 1)
+        if fn == "amoswap":
+            v, t, m = self.load_cap(rs1, ea, checked=True)                       # old value, clc tag rules
+            self.store_cap(rs1, ea, rs2, checked=True, val=d_val, tag=d_tag, meta=d_meta)
+            return self.rd_write(rd, v, t, m)
+        old = int.from_bytes(self.ram[ea:ea + 16], "little")
+        new = {"amoadd": old + d_val, "amoand": old & d_val, "amoor": old | d_val, "amoxor": old ^ d_val}[fn] & MASK
+        self.ram[ea:ea + 16] = new.to_bytes(16, "little")
+        self.mtag.pop(g, None)                 # a data write: the granule's tag is cleared
+        self.resv = None
+        return self.rd_write(rd, old)
+
     def seal_op(self, fn, rd, rs1, rs2):
         a, t1, (p1, b1, top1, ot1) = self.val[rs1], self.tag[rs1], self.meta[rs1]
         k, t2, (p2, b2, top2, ot2) = self.val[rs2], self.tag[rs2], self.meta[rs2]
@@ -491,6 +535,7 @@ class Machine:
         self.csr[CSR_STATUS] = (st & ST_TIE) | (ST_PIE if st & ST_IE else 0) | (ST_PU if st & ST_U else 0)
         self.csr[1], self.csr[2], self.csr[3] = self.pc, cause, tval
         self.epcc, self.pcc = self.pcc, ROOT_META   # handler runs with the root PCC
+        self.resv = None                    # v4: traps and interrupts clear the lr/sc reservation
         if self.csr[0] == 0:
             self.halted = ("trap", cause)
         else:

@@ -63,8 +63,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest", "perm4"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest", "perm4", "amo"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 4])[0]
         if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user", "bpat", "call", "nest"):
             k = "alu"
         if k == "alu":
@@ -237,6 +237,32 @@ class Gen:
             self.out.append(f"{Le}:")
             self.emit("cjalr r0, r56")
             self.out.append(f"{La}:")
+        elif k == "amo":            # v4 atomics: lr/sc pairs (+ disturbances), AMOs, faults, capability swaps
+            if allow_ctrl:          # (inside fetch-fault regions r57 could be stale -> base registers only)
+                c = r.random()
+                off = r.randrange(0, 1024, 16) if c < 0.9 else r.choice([8, 4, 1, 1024, 1040])   # (never below data: code)
+                if r.random() < 0.5:
+                    self.emit(f"addi r57, r3, {off}")          # untagged (hybrid) address
+                else:
+                    self.emit(f"cincaddri r57, r60, {off}")       # through the data capability
+                base = 57 if r.random() > 0.03 else 52           # (MMIO -> access fault)
+            else:
+                base = r.choice([3, 60])
+            c = r.random()
+            if c < 0.45:
+                self.emit(f"lr r{self.dst()}, (r{base})")
+                for _ in range(r.choice([0, 0, 1, 2])):
+                    if r.random() < 0.2:
+                        self.emit(f"sq r{self.src()}, {r.randrange(0, 1024, 16)}(r3)")   # clears the reservation
+                    else:
+                        self.one(allow_ctrl=False)
+                self.emit(f"sc r{self.dst()}, r{self.src()}, (r{base if r.random() < 0.85 else 3})")
+                if r.random() < 0.3:
+                    self.emit(f"sc r{self.dst()}, r{self.src()}, (r{base})")             # second sc fails
+            else:
+                fn = r.choice(["amoswap", "amoswap", "amoadd", "amoand", "amoor", "amoxor"])
+                data = r.choice([self.src(), self.src(), 58, 60, 63])                   # sometimes a capability
+                self.emit(f"{fn} r{self.dst()}, r{data}, (r{base})")
         elif k == "perm4":          # v4 GLOBAL / LOAD_MUTABLE / STORE_LOCAL: derive a data cap with chosen perms
             mask = r.choice([0x77F, 0x6FF, 0x3FF, 0x37F, 0x5FF, 0x7FF, 0x59B, 0x41B, 0x19B, r.getrandbits(11)])
             self.emit(f"li r57, {mask}")
@@ -365,10 +391,10 @@ def gen_program(seed, n=None):
     g.emit("csetaddr r60, rc, r3")
     g.emit("csetbnd r60, r60, r5")
     if r.random() < 0.5:
-        g.emit("li r6, 3")              # sometimes a read-only data capability
+        g.emit(f"li r6, {r.choice([0x203, 0x303, 0x283, 3])}")   # sometimes a no-EXEC data cap (+CINVOKE/LM/GLOBAL mix)
         g.emit(f"candperm r60, r60, r{r.choice([6, 5])}")
     elif r.random() < 0.3:
-        g.emit(f"li r6, {r.choice([0x0F, 0x17, 0x1B, 0x09, 0x0D, 0x19])}")   # drop STORE_CAP / LOAD_CAP / LOAD / STORE
+        g.emit(f"li r6, {r.choice([0x20F, 0x217, 0x39B, 0x309, 0x20D, 0x519, 0x0F, 0x29B])}")   # drop STORE_CAP / LOAD_CAP / LOAD / STORE (v4: + G/LM/CI/SL mix)
         g.emit("candperm r60, r60, r6")
     g.emit("li r54, 0x60")                  # sealing authority (SEAL|UNSEAL), cursor = small otype
     g.emit("candperm r55, rc, r54")

@@ -75,6 +75,15 @@ MUTANTS = [
     ("lm_strip_keeps_lm_bit", "tx_core.sv", "MW'(PERM_LM_STRIP)", "MW'(11'h412)"),
     ("cinvoke_data_ci_unchecked", "tx_core.sv",
      "else if (!b_perm[P_CINVOKE]) begin cap_cause = C_CAP_PERM; cap_tv = b; end", ""),
+    ("sc_ignores_reservation", "tx_core.sv", "& ~(mem_sc & ~resv_hit);", ";"),
+    ("resv_kept_across_store", "tx_core.sv", "end else if (mem_v && !exmem_trap && exmem_store) resv_v <= 1'b0;", "end"),
+    ("resv_kept_across_trap", "tx_core.sv", "if (mem_trap) resv_v <= 1'b0;", "if (1'b0) resv_v <= 1'b0;"),
+    ("resv_granule_unchecked", "tx_core.sv", "resv_v & (resv_g == exmem_ea[RB-1:4]);", "resv_v;"),
+    ("amo_arith_keeps_tag", "tx_core.sv", "exmem_csc   <= capst; ", "exmem_csc   <= capst | is_amo; "),
+    ("amo_no_load_use_interlock", "tx_core.sv", " || idex_inst[5:0] == OP_AMO);", ");"),
+    ("amo_mmio_allowed", "tx_core.sv", "(!in_mmio || is_amo)", "!in_mmio"),
+    ("amoswap_no_store_cap_check", "tx_core.sv", "((amo_fn == AMO_SC) | (amo_fn == AMO_SWAP)));  // stores rs2's tag",
+     "(amo_fn == AMO_SC));  // stores rs2's tag"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

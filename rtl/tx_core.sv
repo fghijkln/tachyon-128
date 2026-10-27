@@ -46,7 +46,7 @@ module tx_core #(
   // decoded instruction class bits
   localparam int K_ALUR = 0, K_MD = 1, K_SIMD = 2, K_CAPR = 3, K_ALUI = 4, K_CAPI = 5, K_WIDE = 6,
                  K_LOAD = 7, K_STORE = 8, K_BR = 9, K_JAL = 10, K_JALR = 11, K_HALT = 12,
-                 K_CSRR = 13, K_CSRW = 14, K_ERET = 15, K_ILL = 16, K_ECALL = 17, NK = 18;
+                 K_CSRR = 13, K_CSRW = 14, K_ERET = 15, K_ILL = 16, K_ECALL = 17, K_AMO = 18, NK = 19;
 
   function automatic logic [NK-1:0] decode(input logic [31:0] i);
     logic [5:0] op; logic [7:0] fn; logic [NK-1:0] k;
@@ -57,6 +57,7 @@ module tx_core #(
       OP_SIMD:   if (fn[7:2] < N_SIMD && !(fn[7:2] == {1'b0, SIMD_VMUL} && fn[1:0] == 2'd3)) k[K_SIMD] = 1;
                  else k[K_ILL] = 1;
       OP_CAP:    if (fn < N_CAP) k[K_CAPR] = 1; else k[K_ILL] = 1;
+      OP_AMO:    if (fn < N_AMO) k[K_AMO] = 1; else k[K_ILL] = 1;
       OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI: k[K_ALUI] = 1;
       OP_CINCADDRI, OP_CSETBNDI: k[K_CAPI] = 1;
       OP_WIDE:   k[K_WIDE] = 1;
@@ -77,7 +78,7 @@ module tx_core #(
 
   function automatic logic writes_rd(input logic [NK-1:0] k);
     writes_rd = k[K_ALUR] | k[K_MD] | k[K_SIMD] | k[K_CAPR] | k[K_ALUI] | k[K_CAPI] | k[K_WIDE] |
-           k[K_LOAD] | k[K_JAL] | k[K_JALR] | k[K_CSRR];
+           k[K_LOAD] | k[K_JAL] | k[K_JALR] | k[K_CSRR] | k[K_AMO];
   endfunction
 
   // ======================================================================== state
@@ -106,6 +107,10 @@ module tx_core #(
   logic [MW-1:0] exmem_smeta, exmem_tmeta;
   logic         exmem_cjalr, exmem_setepcc;
   logic         idex_call, idex_ret, exmem_call, exmem_ret;   // RAS classification (v4)
+  logic         exmem_amo;                                    // v4 atomic in MEM (fn in exmem_amofn)
+  logic [2:0]   exmem_amofn;
+  logic         resv_v;                                       // lr/sc reservation (valid, granule)
+  logic [RB-5:0] resv_g;
   logic [127:0] exmem_pc, exmem_val, exmem_ea, exmem_sdata, exmem_tval0;
   logic [128:0] exmem_eaend;
   logic         exmem_priv, exmem_hyb;     // privileged instruction / untagged-base memory access
@@ -211,9 +216,9 @@ module tx_core #(
   wire [5:0]   id_rs2  = (id_k[K_STORE] | id_k[K_BR] | id_k[K_WIDE]) ? id_fa : ifid_inst[23:18];
   wire         id_use1 = id_k[K_ALUR] | id_k[K_MD] | id_k[K_SIMD] | id_k[K_CAPR] | id_k[K_ALUI] |
                          id_k[K_CAPI] | id_k[K_LOAD] | id_k[K_STORE] | id_k[K_BR] | id_k[K_JALR] |
-                         id_k[K_HALT] | id_k[K_CSRW];
+                         id_k[K_HALT] | id_k[K_CSRW] | id_k[K_AMO];
   wire         id_use2 = id_k[K_ALUR] | id_k[K_MD] | id_k[K_SIMD] | id_k[K_CAPR] | id_k[K_STORE] |
-                         id_k[K_BR] | (id_k[K_WIDE] & ifid_inst[15]);
+                         id_k[K_BR] | (id_k[K_WIDE] & ifid_inst[15]) | id_k[K_AMO];
   wire         id_csetepcc = id_k[K_CAPR] & (ifid_inst[28:24] == CF_CSETEPCC);
   wire         id_we   = writes_rd(id_k) & (id_fa != 6'd0) & ~ifid_fault & ~id_csetepcc;
 
@@ -245,7 +250,7 @@ module tx_core #(
 
   // load-use / csrr-use interlock
   wire ex_is_late = idex_valid & idex_we & ((idex_inst[5:0] >= OP_LB && idex_inst[5:0] <= OP_CLC) ||
-                    idex_inst[5:0] == OP_CSRR);
+                    idex_inst[5:0] == OP_CSRR || idex_inst[5:0] == OP_AMO);   // AMO results come from MEM
   wire stall_lu = ifid_valid & ex_is_late &
                   ((id_use1 & id_rs1 == idex_rd) | (id_use2 & id_rs2 == idex_rd));
 
@@ -418,7 +423,13 @@ module tx_core #(
   wire [127:0] wide_y   = idex_inst[15] ? ((b & ~({112'd0, 16'hFFFF} << wide_sh)) | wide_ins) : wide_ins;
 
   // ---- memory address + checks
-  wire [127:0] ea = a + ex_imm;
+  // ---- v4 atomics: address = rs1 (no offset); lr loads, sc stores, amo* read-modify-write in MEM
+  wire         is_amo   = ex_k[K_AMO];
+  wire [2:0]   amo_fn   = ex_fn[2:0];
+  wire         amo_ld   = is_amo & (amo_fn != AMO_SC);          // reads memory (lr, amoswap, arithmetic)
+  wire         amo_st   = is_amo & (amo_fn != AMO_LR);          // writes memory (sc, amoswap, arithmetic)
+  wire         capst    = (ex_op == OP_CSC) | (is_amo & ((amo_fn == AMO_SC) | (amo_fn == AMO_SWAP)));  // stores rs2's tag
+  wire [127:0] ea = a + (is_amo ? 128'd0 : ex_imm);
   logic [4:0] msize;
   always_comb
     case (ex_op)
@@ -428,9 +439,10 @@ module tx_core #(
       OP_LD, OP_LDU, OP_SD: msize = 5'd8;
       default:              msize = 5'd16;
     endcase
-  wire         is_mem   = ex_k[K_LOAD] | ex_k[K_STORE];
+  wire         is_mem   = ex_k[K_LOAD] | ex_k[K_STORE] | is_amo;
   wire [128:0] ea_end   = {1'b0, ea} + {124'd0, msize};
-  wire         need_p   = ex_k[K_STORE] ? a_perm[1] : a_perm[0];
+  wire         need_p   = is_amo ? ((~amo_ld | a_perm[0]) & (~amo_st | a_perm[1])) :
+                          ex_k[K_STORE] ? a_perm[1] : a_perm[0];
   wire         is_csc   = ex_op == OP_CSC;
   wire         is_clc   = ex_op == OP_CLC;
   wire [3:0]   amask    = msize[3:0] - 4'd1;           // 16 -> 4'hF
@@ -443,11 +455,11 @@ module tx_core #(
     mem_fault = 1'b1;
     if (a_sealed) mem_cause = C_CAP_SEALED;
     else if (a_tag && !need_p) mem_cause = C_CAP_PERM;
-    else if (a_tag && is_csc && b_tag && !a_perm[4]) mem_cause = C_CAP_PERM;   // STORE_CAP
-    else if (a_tag && is_csc && b_tag && !b_perm[P_GLOBAL] && !a_perm[P_STORE_LOCAL]) mem_cause = C_CAP_PERM; // local cap
+    else if (a_tag && capst && b_tag && !a_perm[4]) mem_cause = C_CAP_PERM;   // STORE_CAP
+    else if (a_tag && capst && b_tag && !b_perm[P_GLOBAL] && !a_perm[P_STORE_LOCAL]) mem_cause = C_CAP_PERM; // local cap
     else if (a_tag && (ea < a_base || ea_end > a_top)) mem_cause = C_CAP_BOUNDS;
     else if (misalign) mem_cause = C_ALIGN;
-    else if (!in_ram && !in_mmio) mem_cause = C_ACCESS;
+    else if (!in_ram && (!in_mmio || is_amo)) mem_cause = C_ACCESS;           // atomics: RAM only
     else begin mem_fault = 1'b0; mem_cause = C_ACCESS; end
   end
 
@@ -520,11 +532,24 @@ module tx_core #(
       OP_SD:   be_raw = 16'h00FF;
       default: be_raw = 16'hFFFF;
     endcase
+  // v4 atomics: sc stores only with a matching reservation; arithmetic AMOs write op(old, rs2) in the same
+  // cycle as they read the old value (combinational read, synchronous write)
+  wire         mem_sc    = exmem_amo & (exmem_amofn == AMO_SC);
+  wire         resv_hit  = resv_v & (resv_g == exmem_ea[RB-1:4]);
+  wire         amo_arith = exmem_amo & (exmem_amofn >= AMO_ADD);
+  logic [127:0] amo_new;
+  always_comb
+    case (exmem_amofn)
+      AMO_ADD: amo_new = dmem_rdata + exmem_sdata;
+      AMO_AND: amo_new = dmem_rdata & exmem_sdata;
+      AMO_OR:  amo_new = dmem_rdata | exmem_sdata;
+      default: amo_new = dmem_rdata ^ exmem_sdata;
+    endcase
   assign dmem_addr  = exmem_ea;
   assign dmem_re    = mem_v & exmem_load & ~exmem_trap;
-  assign dmem_we    = mem_v & exmem_store & ~exmem_trap & ~halted_q;
+  assign dmem_we    = mem_v & exmem_store & ~exmem_trap & ~halted_q & ~(mem_sc & ~resv_hit);
   assign dmem_be    = be_raw << exmem_ea[3:0];
-  assign dmem_wdata = exmem_sdata << mshift;
+  assign dmem_wdata = amo_arith ? amo_new : (exmem_sdata << mshift);
   assign dmem_wmeta = exmem_csc ? exmem_smeta : '0;
 
   wire [127:0] mmio_word = (exmem_ea[127:4] == MMIO_MTIME[127:4]) ? mtime_q :
@@ -593,6 +618,7 @@ module tx_core #(
       ifid_valid <= 1'b0; idex_valid <= 1'b0; exmem_valid <= 1'b0; memwb_valid <= 1'b0;
       csr_tvec <= '0; csr_epc <= '0; csr_cause <= '0; csr_tval <= '0; csr_scratch <= '0;
       csr_status <= '0; csr_ubase <= '0; csr_ubound <= '0; mtime_q <= '0; mtimecmp_q <= {128{1'b1}};
+      resv_v <= 1'b0;
     end else if (!halted_q) begin
       // ---------------- PC
       if (mem_redirect)      pc_q <= mem_target;
@@ -645,8 +671,10 @@ module tx_core #(
         exmem_val   <= ex_val;
         exmem_meta  <= ex_meta;
         exmem_op    <= ex_op;
-        exmem_load  <= ex_k[K_LOAD];
-        exmem_store <= ex_k[K_STORE];
+        exmem_load  <= ex_k[K_LOAD] | is_amo;          // every AMO's rd comes from MEM (sc: success flag)
+        exmem_store <= ex_k[K_STORE] | amo_st;
+        exmem_amo   <= is_amo;
+        exmem_amofn <= amo_fn;
         exmem_ea    <= ea;
         exmem_mmio  <= in_mmio;
         exmem_sdata <= b;
@@ -656,8 +684,8 @@ module tx_core #(
         exmem_setepcc <= ex_setepcc & ~ex_trap;
         exmem_call  <= idex_call & ~idex_fault;
         exmem_ret   <= idex_ret & ~idex_fault;
-        exmem_clc   <= is_clc;
-        exmem_csc   <= is_csc;
+        exmem_clc   <= is_clc | (is_amo & ((amo_fn == AMO_LR) | (amo_fn == AMO_SWAP)));   // clc tag rules
+        exmem_csc   <= capst;                                                          // csc tag rules
         exmem_ldcap <= ~a_tag | a_perm[3];               // LOAD_CAP (or unchecked base)
         exmem_ldro  <= a_tag & ~a_perm[P_LM];            // no LOAD_MUTABLE: clc result loses the store perms + LM
         exmem_trap0  <= ex_trap;
@@ -682,6 +710,11 @@ module tx_core #(
 
       // ---------------- MEM: CSRs, traps
       if (mem_v && !exmem_trap) mtime_q <= mtime_q + 128'd1;     // retirement
+      // lr/sc reservation: set by lr, cleared by every completed store/sc/AMO and by every trap or interrupt
+      if (mem_trap) resv_v <= 1'b0;
+      else if (mem_v && !exmem_trap && exmem_amo && exmem_amofn == AMO_LR) begin
+        resv_v <= 1'b1; resv_g <= exmem_ea[RB-1:4];
+      end else if (mem_v && !exmem_trap && exmem_store) resv_v <= 1'b0;
       if (mem_wr_cmp) mtimecmp_q <= exmem_sdata & st_mask;
       if (mem_trap) begin
         csr_epc <= exmem_pc;
@@ -710,7 +743,7 @@ module tx_core #(
       memwb_pc    <= exmem_pc;
       memwb_rd    <= exmem_rd;
       memwb_we    <= exmem_we & ~exmem_trap & ~mem_irq;
-      memwb_val   <= exmem_load ? ld_val : (exmem_csrr ? csr_rd : exmem_val);
+      memwb_val   <= mem_sc ? {127'd0, ~resv_hit} : exmem_load ? ld_val : (exmem_csrr ? csr_rd : exmem_val);
       memwb_meta  <= exmem_load ? ((exmem_clc & ~exmem_mmio & exmem_ldcap & dmem_rmeta[M_TAG]) ? clc_meta : '0)
                                 : (exmem_csrr ? '0 : exmem_meta);
       memwb_trap  <= exmem_trap | mem_irq;

@@ -23,6 +23,7 @@ OP_ALU = 0x01      # R-type, func = ALU op
 OP_MULDIV = 0x02   # R-type, func = MULDIV op
 OP_SIMD = 0x03     # R-type, func = (simd_op << 2) | lane_width
 OP_CAP = 0x04      # R-type, func = CAP op
+OP_AMO = 0x05      # R-type, func = AMO op (v4 atomics): rd, rs2 = data, rs1 = address
 
 OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI = range(0x08, 0x11)
 OP_CINCADDRI = 0x11
@@ -58,6 +59,8 @@ CAP_FUNCS = ["csetaddr", "cincaddr", "csetbnd", "candperm", "cgetbase", "cgetlen
              "cseal", "cunseal", "cgettype", "csealentry", "cinvoke"]
 CAP_UNARY = {"cgetbase", "cgetlen", "cgetperm", "cgettag", "cclrtag", "cjalr", "cgettype",
              "csealentry"}                                                    # rd, rs1
+# v4 atomics (128-bit, single hart): lr rd, (rs1) / sc rd, rs2, (rs1) / amo<op> rd, rs2, (rs1)
+AMO_FUNCS = ["lr", "sc", "amoswap", "amoadd", "amoand", "amoor", "amoxor"]
 CAP_RD_ONLY = {"cgetpcc"}                                                     # rd
 CAP_RS1_ONLY = {"csetepcc"}                                                   # rs1
 
