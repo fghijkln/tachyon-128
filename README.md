@@ -296,7 +296,7 @@ unchanged.
 | Directed unit tests | **207 / 207** + 5/5 cycle bounds |
 | Demo programs | 9 / 9 |
 | Random differential | **2000 / 2000** (seeds 1…2000, 3 518 871 instructions; new streams `cmove`, revocation) |
-| Mutation check | 79 mutants (v6: + 4 `cmove`, + 6 revocation/`cloadtags`/`crevtag`) — see `results/` and the v6 merge notes |
+| Mutation check | **79 / 79 caught** (v6: + 4 `cmove`, + 6 revocation/`cloadtags`/`crevtag`; `eret_no_fetch_pcc_restore` and `amo_mmio_allowed` re-targeted at the current RTL text; `results/mutants.txt`) |
 | C tests | 87 × {`-O`, `-O0`} = **174 / 174** |
 | Purecap C + fault tests | **112 / 112** at `-O` and `-O0`, both also trace-matched on the RTL (`--purecap --rtl`) |
 | Differential fuzzing | 150/150 `-O`, 100/100 `-O0`, 150/150 `-mpurecap` per merge |
