@@ -12,7 +12,9 @@ module tb (
 
   logic [127:0] ram [0:RAMW-1];
   logic [MW-1:0] tmeta [0:RAMW-1];      // shadow tag memory: tag + capability metadata per granule
-  string prog, tracef, conf, memf, statf, tagf;
+  localparam int REVW = RAMW / 128;      // v6 revocation bitmap: one bit per granule, 128 bits per word
+  logic [127:0] revmap [0:REVW-1];
+  string prog, tracef, conf, memf, statf, tagf, revf;
   integer ftr, fcon;
   longint unsigned cycles, retired;
 
@@ -23,7 +25,9 @@ module tb (
     if (!$value$plusargs("mem=%s", memf)) memf = "rtl.mem";
     if (!$value$plusargs("stat=%s", statf)) statf = "rtl.stat";
     if (!$value$plusargs("tags=%s", tagf)) tagf = "rtl.tags";
+    if (!$value$plusargs("rev=%s", revf)) revf = "rtl.rev";
     for (int i = 0; i < RAMW; i++) begin ram[i] = '0; tmeta[i] = '0; end
+    for (int i = 0; i < REVW; i++) revmap[i] = '0;
     $readmemh(prog, ram);
     ftr = $fopen(tracef, "w");
     fcon = $fopen(conf, "wb");
@@ -32,6 +36,9 @@ module tb (
 
   logic [127:0] imem_addr, dmem_addr, dmem_wdata, dmem_rdata;
   logic [MW-1:0] dmem_wmeta, dmem_rmeta;
+  logic [15:0] dmem_rtags;
+  logic [127:0] rev_addr_a;
+  logic rev_bit_a;
   logic [31:0] imem_rdata, exit_code;
   logic dmem_re, dmem_we, halted;
   logic [15:0] dmem_be;
@@ -47,7 +54,16 @@ module tb (
   wire [127:0] iword = ram[imem_addr[RB-1:4]];
   assign imem_rdata = i_in ? iword[imem_addr[3:2]*32 +: 32] : 32'd0;
   wire d_in = ~|dmem_addr[127:RB];
-  assign dmem_rdata = d_in ? ram[dmem_addr[RB-1:4]] : '0;
+  // MMIO + 0x8000 .. +0x87FF: the revocation bitmap (v6)
+  wire d_rev = dmem_addr[127:11] == {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 5'b10000};
+  assign dmem_rdata = d_in ? ram[dmem_addr[RB-1:4]] : d_rev ? revmap[dmem_addr[10:4]] : '0;
+  always_comb for (int i = 0; i < 16; i++) dmem_rtags[i] = tmeta[{dmem_addr[RB-1:8], 4'(i)}][M_TAG];
+  function automatic logic rev_bit(input logic [127:0] base);
+    logic [RB-5:0] g;
+    g = base[RB-1:4];
+    rev_bit = ~|base[127:RB] & revmap[g[RB-5:7]][g[6:0]];
+  endfunction
+  assign rev_bit_a = rev_bit(rev_addr_a);
   assign dmem_rmeta = d_in ? tmeta[dmem_addr[RB-1:4]] : '0;
 
   logic [127:0] bemask;
@@ -61,6 +77,8 @@ module tb (
           ram[dmem_addr[RB-1:4]] <= (ram[dmem_addr[RB-1:4]] & ~bemask) | (dmem_wdata & bemask);
           tmeta[dmem_addr[RB-1:4]] <= dmem_wmeta;
         end
+        else if (d_rev)
+          revmap[dmem_addr[10:4]] <= (revmap[dmem_addr[10:4]] & ~bemask) | (dmem_wdata & bemask);
         else if (dmem_addr == {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0000})
           $fwrite(fcon, "%c", dmem_wdata[7:0]);
         else if (dmem_addr == {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0020})
@@ -91,6 +109,9 @@ module tb (
     for (int i = 0; i < RAMW; i++)
       if (tmeta[i][M_TAG]) $fwrite(fm, "%0h %0d %0h %0h %0h\n", i, tmeta[i][M_PERM +: PW], tmeta[i][256:129],
                                    tmeta[i][128:0], tmeta[i][M_OT +: 16]);
+    $fclose(fm);
+    fm = $fopen(revf, "w");
+    for (int i = 0; i < REVW; i++) $fwrite(fm, "%032h\n", revmap[i]);
     $fclose(fm);
     fs = $fopen(statf, "w");
     $fwrite(fs, "cycles %0d\nretired %0d\nexit %0d\n", cycles, retired, exit_code);

@@ -208,6 +208,9 @@ class Assembler:
                 return [enc_r(OP_CAP, R(ops[0]), R(ops[1]), 0, CAP_FUNCS.index(mn))]
             need(3)
             return [enc_r(OP_CAP, R(ops[0]), R(ops[1]), R(ops[2]), CAP_FUNCS.index(mn))]
+        if mn == "crevtag":                     # v6: I layout, imm14 = 0
+            need(2)
+            return [enc_i(OP_CREVTAG, R(ops[0]), R(ops[1]), 0)]
         if mn in I_OPS:
             need(3)
             v = E(ops[2])

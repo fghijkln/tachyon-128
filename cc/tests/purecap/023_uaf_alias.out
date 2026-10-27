@@ -1,0 +1,6 @@
+cached alice (1)
+alias tag 1
+
+*** capability trap (hardware): cause=10 <A>
+
+---exit 138

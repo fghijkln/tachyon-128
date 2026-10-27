@@ -28,6 +28,7 @@
 - **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
 - **v5 32 位字运算（RV64 “W” 风格）**：`addw/subw/sllw/srlw/sraw/mulw/divw/remw` 与立即数形式 `addiw/slliw/srliw/sraiw`，只看源操作数低 32 位，结果符号扩展到 128 位；另有零扩展变体 `addwu/subwu/sllwu/mulwu/addiwu/slliwu`（无符号 `int`）。伪指令 `sext.w`/`zext.w`。`mulw` 只需乘法器一遍（3 周期，完整乘法 6 周期）。C 编译器用它们取代 `int` 运算后的两条移位扩展指令。
+- **v6 能力撤销（use-after-free 检测）**：MMIO+0x8000 处 2 KiB 的撤销位图（每个 16 字节 RAM 粒度 1 位）；任何访存若其授权能力的 base 所在粒度被标记，即触发 cause 10（capability-revoked），能力的所有副本（寄存器或内存中）同时失效。`crevtag rd, rs1`（base 被撤销则清 tag）与 `cloadtags rd, imm(rs1)`（一次读出 256 字节块内 16 个粒度的 tag 位）用于撤销扫描。purecap libc 的 `free` 将块标记撤销并放入隔离区，隔离区满时扫描全部 RAM 与寄存器清除指向已释放块的能力后才复用内存（CHERIvoke/Cornucopia 风格）。
 - **v4 可读 EPCC**：`cgetepcc rd`（仅内核态）读出 EPCC（游标 = epc），内核可在抢占时保存任务的真实 PCC。
 - **v4 原子操作**：128 位 `lr`/`sc`（单核语义，任何存储或陷入都会清除保留）以及 `amoswap/amoadd/amoand/amoor/amoxor`；`lr`/`sc`/`amoswap` 遵循 `clc`/`csc` 的标签规则，可原子地交换能力。
 - **v4 微架构**：8 项返回地址栈（RAS，推测更新 + 提交副本在陷入时恢复）预测 `call`/`ret`；乘法器面积缩小——标量乘法的 128×32 部分积阵列与 SIMD `vmul` 共享一块“可拆分”的 4×(32×32) radix-4 Booth 乘法阵列（仍为 6 周期）。
@@ -123,6 +124,8 @@ At reset all registers read as zero and untagged, except `rc` (r63), which holds
 | 0x14 | `wli` (k=0) / `wins` (k=1) | K |
 | 0x18–0x20 | `lb lh lw ld lq lbu lhu lwu ldu` | I |
 | 0x21 | `clc` (capability load, §5.1.1) | I |
+| 0x22 | `cloadtags rd, imm(rs1)` (v6, shadow tags of a 256-byte block, §5.1.7) | I |
+| 0x23 | `crevtag rd, rs1` (v6, drop the tag of a revoked capability, §5.1.7; imm14 = 0) | I |
 | 0x28–0x2C | `sb sh sw sd sq` | S |
 | 0x2D | `csc` (capability store, §5.1.1) | S |
 | 0x30–0x35 | `beq bne blt bge bltu bgeu` | B |
@@ -209,6 +212,7 @@ remainder = 0. No trap is raised (RISC-V convention).
 Access checks, in priority order (the first failing check raises its trap; `tval = ea`):
 
 0. if `rs1` is **sealed** (§5.1.3) → *capability-sealed*
+   (v6) if `rs1` is **tagged** and its base granule is marked in the revocation bitmap (§5.1.7) → *capability-revoked*
 1. if `rs1` is **tagged**: permission (`LOAD` for loads, `STORE` for stores) → *capability-permission*
    (`csc` of a tagged value additionally needs `STORE_CAP`, §5.1.1)
 2. if `rs1` is **tagged**: `base ≤ ea` and `ea + size ≤ top` → *capability-bounds*
@@ -512,6 +516,40 @@ local capabilities to its own stack) and only *global* capabilities without STOR
 pointer to the stack can then never be stored into the heap or a shared buffer and outlive the call (CHERI's rule for
 stack-derived capabilities), without any per-store address-range check. `programs/caplist.s` shows both cases.
 
+### 5.1.7 Capability revocation (v6): temporal safety / use after free
+
+Bounds stop a pointer from leaving its object in *space*; revocation stops it from outliving the object in *time*.
+
+**Revocation bitmap.** `MMIO + 0x8000 .. + 0x87FF` (2 KiB) holds one bit per 16-byte RAM granule: bit `g`
+(byte `g >> 3`, bit `g & 7`, little-endian) belongs to granule `g` = addresses `[16g, 16g + 16)`. It is ordinary
+read/write memory-mapped storage (any load/store size, reset 0); atomics and `cloadtags` on it are *access-fault*.
+A store to the bitmap takes effect for the very next instruction (the reference pipeline refetches after it).
+
+**Revoked capabilities.** A tagged, unsealed capability is *revoked* when the granule containing its **base** is
+marked. Every data access through a revoked authority — loads, stores, `clc`, `csc`, atomics, `cloadtags` — raises
+*capability-revoked* (cause 10, `tval = ea`). The check comes after *sealed* and before every other check
+(permissions, bounds, alignment). Because the test uses the capability's base and not the address, it applies to
+**every copy** of a capability, in a register or in memory, and to every capability derived from it whose base lies
+in a marked granule (all interior sub-capabilities of a marked object). Marking the granules of an allocation
+therefore kills all pointers to it at once without finding them. Instruction fetch, `cjalr` targets, untagged
+(hybrid) bases and capabilities whose base lies outside RAM are never revoked; `clc` loads a revoked capability
+unchanged (tag set) — it just cannot be used.
+
+**Sweeping.** The bitmap only says "do not use". Before the memory can be *reused*, every capability to it must
+lose its tag, otherwise clearing the bits would resurrect them. Two instructions make the sweep cheap:
+
+* `crevtag rd, rs1` (op 0x23): `rd ← rs1` with the tag cleared if `rs1` is tagged and revoked (value, bounds and
+  permissions are kept; an unrevoked or untagged `rs1` is copied unchanged). Never traps.
+* `cloadtags rd, imm(rs1)` (op 0x22): `ea = rs1 + imm` must be 256-byte aligned; `rd ←` 16-bit mask whose bit `i` is
+  the shadow tag of granule `ea/16 + i`. Checked like a 256-byte load that additionally needs LOAD_CAP; RAM only
+  (*access-fault* elsewhere, MMIO included); *misaligned* if `ea mod 256 ≠ 0`.
+
+A sweep visits each 256-byte block with `cloadtags`, and only for its tagged granules does `clc` → `crevtag` → `csc`;
+then it passes the registers through `crevtag`. After the sweep no capability to a marked granule exists anywhere,
+and the allocator may clear the bits and reuse the memory (the CHERIvoke / Cornucopia scheme: quarantine + shadow
+bitmap + sweep; the per-access check is CHERIoT's load filter moved to use time, so a freed object is dead
+*immediately*, not only after the next sweep). The purecap C library does exactly this (`cc/ABI.md` §8.2).
+
 ### 5.2 SIMD lanes inside a GPR
 
 `func8 = (sop << 2) | lane`, lane 0/1/2/3 = 8/16/32/64-bit lanes (assembler suffix `.b .h .w .d`).
@@ -551,6 +589,7 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 | 7 | capability-sealed | use or modification of a sealed capability; `cseal` of a sealed one; `cunseal` of an unsealed one, a sentry, or with the wrong otype; `cjalr` through a non-sentry sealed capability; `cinvoke` operand checks (§5.1.4) |
 | 8 | environment-call | `ecall` (`tval` = 0) |
 | 9 | privilege-violation | user mode: privileged instruction (`tval` = instruction word), untagged-base access outside `[ubase, ubound)` (`tval` = ea) |
+| 10 | capability-revoked | **v6:** any data access (load, store, `clc`, `csc`, atomic, `cloadtags`) through a tagged, unsealed capability whose base granule is marked in the revocation bitmap (`tval` = ea, §5.1.7) |
 
 Capability faults on instruction fetch (PCC lacks EXEC / pc outside PCC) use causes 4 / 3 with `tval` = pc;
 `cjalr` raises 2 / 4 for an untagged / non-executable target.
@@ -626,6 +665,7 @@ killed for an untagged MMIO store (cause 9).
 | `MMIO + 0x20` | | HEXOUT: write → value as 32 hex digits + newline |
 | `MMIO + 0x30` | | MTIME: read → instructions retired so far (§6.1); writes ignored |
 | `MMIO + 0x40` | | MTIMECMP: read/write timer compare, reset all ones (§6.1) |
+| `MMIO + 0x8000` | 2 KiB | **v6** REVMAP: capability revocation bitmap, read/write, reset 0 (§5.1.7) |
 
 Other MMIO offsets ignore writes and read 0. Self-modifying code is not supported (no fence).
 
@@ -648,6 +688,9 @@ label:  op operands      # comment   (';' also starts a comment)
 * Two privilege levels only; no per-mode CSR views (user mode cannot read any CSR); `rc` is the only root of
   authority after reset. (v4: EPCC is readable by the supervisor with `cgetepcc`; `ubase`/`ubound` were already
   readable CSRs, so a kernel saves the whole per-task context.)
+* v6 revocation (§5.1.7) protects RAM only and trusts whoever can store to the bitmap; there is no hardware-enforced
+  allocator compartment (in the purecap C runtime the bitmap capability is a libc global), and the sweep is software
+  (no background revoker, no per-page capability-dirty bits).
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
 * One interrupt source (the deterministic machine timer); no external/software interrupts, no wall-clock time base.
 * No FPU, no fence for self-modifying code. Atomics (§4.6) are single-hart only: no multi-core coherence, the

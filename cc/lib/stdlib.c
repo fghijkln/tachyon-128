@@ -1,9 +1,10 @@
 /* tcc128 stdlib: bump-pointer heap, conversions, qsort, glibc-compatible rand() */
 #include <stddef.h>
 #include <string.h>
+int printf(const char *, ...);
+void abort(void);
 
 extern char _end[];           /* end of the program image (emitted by the tcc128 linker) */
-static char *heap_cur;
 #ifdef __PURECAP__
 #define STACK_RESERVE 0x20000  /* purecap: the stack capability covers exactly [RAM_TOP - 128 KiB, RAM_TOP) */
 #else
@@ -11,10 +12,210 @@ static char *heap_cur;
 #endif
 #define RAM_TOP 0x40000
 
-/* purecap: heap_cur is an unbounded RAM capability (from _end); malloc returns a capability bounded
-   to exactly the requested size, so free/realloc re-derive the header address from heap_cur. */
+#ifdef __PURECAP__
+/* ---------------------------------------------------------------------------------------------------
+   purecap heap with temporal safety (v6, cc/ABI.md section 8.2)
+
+   Every block is a 16-byte header {size, state} followed by the payload; malloc returns a capability
+   bounded to exactly the requested size, so user code can never reach a header (metadata protection by
+   bounds). All allocator accesses go through heap_cap, a RAM capability whose base (0) is never revoked.
+
+   free(p):  * probes p with a load: a stale, already-swept pointer is untagged (user mode -> cause 9) and a
+               freed-but-not-yet-swept one is revoked (cause 10), so use after free and double free trap
+               in hardware before the allocator looks at anything;
+             * checks that p is exactly a live block (capability base == address, header magic, length) and
+               aborts on an interior or foreign pointer;
+             * marks the payload granules in the hardware revocation bitmap (from now on every access through
+               any copy of p, in a register or in memory, traps with cause 10; copies still load tagged but
+               are unusable) and puts the block in quarantine; nothing in quarantine is ever reused.
+   When the quarantine reaches max(REV_QUARANTINE_MIN, heap/4) (or malloc runs out of memory) a revocation
+   sweep runs: __tx_revoke_sweep (crt0_purecap.s) uses cloadtags to visit every tagged granule of the
+   memory that can hold capabilities - the image and the heap [0, heap_top) and the stack region
+   [RAM_TOP - 128 KiB, RAM_TOP) (the gap between them has never been written) - and rewrites each through
+   crevtag (so capabilities into revoked memory lose their tag), then passes the callee-saved registers
+   through crevtag. Only then are the quarantined blocks'
+   bitmap bits cleared and the blocks moved to the free lists: a block is reused only after no capability to
+   it survives anywhere (CHERIvoke / Cornucopia-style revocation with a CHERIoT-style load filter).
+
+   -fno-revoke / TCC128_NO_REVOKE=1 (defines __TX_NO_REVOKE): same allocator without the probe, bitmap,
+   quarantine and sweeps (freed blocks are reused at once) - the baseline for measuring the overhead.
+   --------------------------------------------------------------------------------------------------- */
+#ifndef REV_QUARANTINE_MIN
+#define REV_QUARANTINE_MIN 16384     /* bytes; quarantine also grows with the heap (heap / 4) */
+#endif
+#define NBINS 64                       /* exact-size free lists for payloads of 16 .. 1024 bytes */
+#define ST_LIVE 0x4C495645ul           /* header state words */
+#define ST_QUAR 0x51554152ul
+#define ST_FREE 0x46524545ul
+extern volatile unsigned char *__tx_revmap;       /* crt0: capability for the revocation bitmap (MMIO) */
+void __tx_revoke_sweep(unsigned long lo, unsigned long hi, unsigned long lo2, unsigned long hi2);
+                                       /* crt0: sweep [lo, hi), [lo2, hi2) and the registers */
+static char *heap_cap;                 /* allocator authority over RAM (base 0) */
+static unsigned long heap_lo, heap_top; /* heap = [heap_lo, heap_top), grows up from _end */
+static unsigned long bins[NBINS + 1];  /* header addresses; bins[0] = larger blocks, first fit */
+static unsigned long quar_head, quar_bytes;
+static unsigned long n_sweeps, n_freed;
+
+static size_t *H(unsigned long a) { return (size_t *)__builtin_cheri_address_set(heap_cap, a); }
+static unsigned long *L(unsigned long a) { return (unsigned long *)__builtin_cheri_address_set(heap_cap, a); }
+
+static void heap_init(void) {
+    heap_cap = _end;
+    heap_lo = heap_top = (unsigned long)(unsigned __int128)_end;
+}
+
+static void bad_free(const char *what) {
+    printf("*** %s(): invalid pointer\n", what);
+    abort();
+}
+static volatile char probe_sink;
+
+static void bin_push(unsigned long h, size_t sz) {
+    int b = sz <= NBINS * 16 ? (int)(sz >> 4) : 0;
+    H(h)[1] = ST_FREE;
+    *L(h + 16) = bins[b];
+    bins[b] = h;
+}
+
+static unsigned long bin_pop(size_t sz) {
+    if (sz <= NBINS * 16) {
+        unsigned long h = bins[sz >> 4];
+        if (h) bins[sz >> 4] = *L(h + 16);
+        return h;
+    }
+    unsigned long *link = &bins[0];
+    for (unsigned long h = *link; h; h = *link) {
+        size_t have = H(h)[0];
+        if (have >= sz) {
+            *link = *L(h + 16);
+            if (have - sz >= 48) {               /* split: the tail becomes a free block of its own */
+                unsigned long t = h + 16 + sz;
+                H(t)[0] = have - sz - 16;
+                bin_push(t, have - sz - 16);
+                H(h)[0] = sz;
+            }
+            return h;
+        }
+        link = L(h + 16);
+    }
+    return 0;
+}
+
+#ifndef __TX_NO_REVOKE
+/* mark the granules of [a, a + n) revoked, one 128-bit bitmap word (128 granules = 2 KiB) at a time */
+static void rev_mark(unsigned long a, unsigned long n) {
+    unsigned long g = a >> 4, e = (a + n) >> 4;
+    while (g < e) {
+        unsigned long b = g & 127, cnt = e - g;
+        if (cnt > 128 - b) cnt = 128 - b;
+        unsigned __int128 m = cnt == 128 ? ~(unsigned __int128)0 : (((unsigned __int128)1 << cnt) - 1) << b;
+        volatile unsigned __int128 *w = (volatile unsigned __int128 *)(__tx_revmap + (g >> 7) * 16);
+        *w = *w | m;
+        g += cnt;
+    }
+}
+
+static void revoke(void) {
+    /* no capability into a quarantined block survives this */
+    __tx_revoke_sweep(0, (heap_top + 255) & ~255ul, RAM_TOP - STACK_RESERVE, RAM_TOP);
+    /* every marked granule belongs to a quarantined block, so the bitmap words covering the heap are
+       simply zeroed (128 granules per 16-byte word) */
+    for (unsigned long w = heap_lo >> 11; w <= (heap_top - 1) >> 11; w++)
+        *(volatile unsigned __int128 *)(__tx_revmap + w * 16) = 0;
+    for (unsigned long q = quar_head; q;) {
+        unsigned long nx = *L(q + 16);
+        bin_push(q, H(q)[0]);
+        q = nx;
+    }
+    quar_head = quar_bytes = 0;
+    n_sweeps++;
+}
+#endif
+
+/* statistics for tests and benchmarks: number of revocation sweeps, number of blocks freed */
+unsigned long __tx_revoke_sweeps(void) { return n_sweeps; }
+unsigned long __tx_heap_frees(void) { return n_freed; }
+
+void *malloc(size_t n) {
+    if (!heap_cap) heap_init();
+    size_t want = n ? n : 1;                 /* malloc(0): a unique 1-byte block (free can probe it) */
+    if (want > RAM_TOP) return 0;
+    size_t sz = (want + 15) & ~(size_t)15;
+    unsigned long h = bin_pop(sz);
+    if (!h) {
+        if (heap_top + 16 + sz <= RAM_TOP - STACK_RESERVE) {
+            h = heap_top;
+            heap_top += 16 + sz;
+            H(h)[0] = sz;
+        } else {
+#ifndef __TX_NO_REVOKE
+            if (quar_head) {
+                revoke();
+                h = bin_pop(sz);
+            }
+#endif
+            if (!h) return 0;
+        }
+    }
+    H(h)[1] = ST_LIVE;
+    return __builtin_cheri_bounds_set(__builtin_cheri_address_set(heap_cap, h + 16), want);
+}
+
+/* validate a pointer handed to free/realloc; returns its header address */
+static unsigned long live_block(void *p, const char *what) {
+#ifndef __TX_NO_REVOKE
+    probe_sink = *(volatile char *)p;        /* hardware check: stale (untagged) -> cause 9, freed (revoked) -> cause 10 */
+#endif
+    unsigned long a = (unsigned long)(unsigned __int128)p;
+    if (!__builtin_cheri_tag_get(p) || (unsigned long)__builtin_cheri_base_get(p) != a || (a & 15)
+            || a < heap_lo + 16 || a >= heap_top)
+        bad_free(what);
+    unsigned long h = a - 16;
+    if (H(h)[1] != ST_LIVE || __builtin_cheri_length_get(p) > H(h)[0]) bad_free(what);
+    return h;
+}
+
+void free(void *p) {
+    if (!p) return;
+    unsigned long h = live_block(p, "free");
+    size_t sz = H(h)[0];
+    n_freed++;
+#ifdef __TX_NO_REVOKE
+    bin_push(h, sz);
+#else
+    H(h)[1] = ST_QUAR;
+    rev_mark(h + 16, sz);                 /* every copy of p is dead from here on */
+    *L(h + 16) = quar_head;
+    quar_head = h;
+    quar_bytes += sz + 16;
+    if (quar_bytes >= REV_QUARANTINE_MIN && quar_bytes * 4 >= heap_top - heap_lo) revoke();
+#endif
+}
+
+void *calloc(size_t n, size_t m) {
+    void *p = malloc(n * m);
+    if (p) memset(p, 0, n * m);
+    return p;
+}
+
+void *realloc(void *p, size_t n) {
+    if (!p) return malloc(n);
+    unsigned long h = live_block(p, "realloc");
+    size_t old = H(h)[0], want = n ? n : 1;
+    if (want <= old) return __builtin_cheri_bounds_set(__builtin_cheri_address_set(heap_cap, h + 16), want);
+    void *q = malloc(n);
+    if (q) {
+        memcpy(q, __builtin_cheri_address_set(heap_cap, h + 16), old);
+        free(p);                             /* the old block is quarantined: stale copies of p now trap */
+    }
+    return q;
+}
+
+#else  /* default (hybrid) mode: bump allocator */
+static char *heap_cur;
+
 static char *hdr_of(void *p) {
-    return (char *)__builtin_cheri_address_set(heap_cur, (unsigned __int128)p) - 16;
+    return (char *)p - 16;
 }
 
 void *malloc(size_t n) {
@@ -47,9 +248,10 @@ void *realloc(void *p, size_t n) {
     size_t old = *(size_t *)hdr_of(p);
     if (n <= old) return __builtin_cheri_bounds_set(hdr_of(p) + 16, n);
     void *q = malloc(n);
-    if (q) memcpy(q, hdr_of(p) + 16, old);    /* p itself may be bounded below old */
+    if (q) memcpy(q, hdr_of(p) + 16, old);
     return q;
 }
+#endif
 
 int abs(int x) { return x < 0 ? -x : x; }
 long labs(long x) { return x < 0 ? -x : x; }

@@ -116,6 +116,7 @@ class Machine:
         self.halted = None          # ('exit', code) | ('trap', cause)
         self.exit_code = 0
         self.resv = None            # v4: lr/sc reservation (granule index) or None
+        self.revmap = bytearray(REVMAP_BYTES)    # v6: capability revocation bitmap (1 bit per RAM granule)
 
     @property
     def user(self):
@@ -131,14 +132,26 @@ class Machine:
         return rd
 
     # ---------------------------------------------------------------- memory
-    def check_access(self, rs1, ea, size, is_store, store_cap=False, store_local=False, rmw=False, ram_only=False):
+    def revoked(self, base):
+        """v6: is the granule holding capability base `base` marked in the revocation bitmap?"""
+        if base >= len(self.ram):
+            return False
+        g = base // GRANULE
+        return bool(self.revmap[g >> 3] >> (g & 7) & 1)
+
+    def check_access(self, rs1, ea, size, is_store, store_cap=False, store_local=False, rmw=False, ram_only=False,
+                     load_cap=False):
         if self.tag[rs1]:
             perm, base, top, otype = self.meta[rs1]
             if otype:
                 raise Trap(CAUSE_CAP_SEALED, ea)
+            if self.revoked(base):
+                raise Trap(CAUSE_CAP_REVOKED, ea)   # v6: the capability's allocation has been freed
             need = PERM_STORE if is_store else PERM_LOAD
             if rmw:
                 need = PERM_LOAD | PERM_STORE       # v4 AMOs read and write
+            if load_cap:
+                need |= PERM_LOAD_CAP               # v6 cloadtags reads shadow tags
             if perm & need != need:
                 raise Trap(CAUSE_CAP_PERM, ea)
             if store_cap and not perm & PERM_STORE_CAP:
@@ -172,6 +185,9 @@ class Machine:
             return self.retired             # instructions retired before this one
         if base == MMIO_MTIMECMP:
             return self.mtimecmp
+        if MMIO_REVMAP <= base < MMIO_REVMAP + REVMAP_BYTES:
+            o = base - MMIO_REVMAP
+            return int.from_bytes(self.revmap[o:o + 16], "little")
         return 0
 
     def irq_pending(self):
@@ -191,6 +207,9 @@ class Machine:
                 raise Halt(v & 0xFFFFFFFF)
             elif ea == MMIO_MTIMECMP:
                 self.mtimecmp = v
+            elif MMIO_REVMAP <= ea < MMIO_REVMAP + REVMAP_BYTES:
+                o = ea - MMIO_REVMAP
+                self.revmap[o:o + size] = v.to_bytes(size, "little")
             return
         self.ram[ea:ea + size] = v.to_bytes(size, "little")
         self.mtag.pop(ea // GRANULE, None)     # any data store clears the granule's tag
@@ -401,6 +420,14 @@ class Machine:
             ea = (x1 + f["imm14"]) & MASK
             v, t, m = self.load_cap(rs1, ea)
             wrote = self.rd_write(rd, v, t, m)
+        elif op == OP_CREVTAG:                  # v6: drop the tag of a capability into revoked memory
+            t = 1 if self.tag[rs1] and not self.revoked(self.meta[rs1][1]) else 0
+            wrote = self.rd_write(rd, x1, t, self.meta[rs1])
+        elif op == OP_CLTAGS:                   # v6: shadow tags of a 256-byte block (RAM only, LOAD + LOAD_CAP)
+            ea = (x1 + f["imm14"]) & MASK
+            self.check_access(rs1, ea, CLTAGS_BYTES, False, ram_only=True, load_cap=True)
+            g0 = ea // GRANULE
+            wrote = self.rd_write(rd, sum(1 << i for i in range(CLTAGS_BYTES // GRANULE) if g0 + i in self.mtag))
         elif op == OP_CSC:
             self.store_cap(rs1, (x1 + f["imm14"]) & MASK, A)
         elif OP_SB <= op <= OP_SQ:
@@ -593,6 +620,10 @@ class Machine:
     def tagdump(self):
         """Shadow tag memory as lines 'granule perm base top otype' (tagged granules only, ascending)."""
         return [f"{g:x} {p} {b:x} {t:x} {o:x}" for g, (p, b, t, o) in sorted(self.mtag.items())]
+
+    def revdump(self):
+        """Revocation bitmap as 128 lines of 32 hex digits (16-byte words, like the RTL dump)."""
+        return [f"{int.from_bytes(self.revmap[i:i + 16], 'little'):032x}" for i in range(0, REVMAP_BYTES, 16)]
 
     def regdump(self):
         out = []

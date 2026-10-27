@@ -1,0 +1,5 @@
+buf = abcdef, moved: yes
+
+*** capability trap (hardware): cause=10 <A>
+
+---exit 138

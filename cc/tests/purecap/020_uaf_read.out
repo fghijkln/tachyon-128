@@ -1,0 +1,5 @@
+before free: secret
+
+*** capability trap (hardware): cause=10 <A>
+
+---exit 138

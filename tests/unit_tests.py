@@ -1790,6 +1790,186 @@ eloop:  addi r20, r20, -1        # mtime passes mtimecmp while disabled
         halt r4
         addi r5, r5, 1
 """
+
+    # ---------------- v6 revocation: bitmap (MMIO + 0x8000), revoked-use trap (cause 10), crevtag, cloadtags
+    T["rev_bitmap_mmio"] = PRE + setup + """
+        li r60, -0x8000            # revocation bitmap (supervisor: untagged access)
+        li r6, 0x0123456789abcdef_fedcba9876543210
+        sq r6, 0(r60)
+        lq r20, 0(r60)
+        ld r21, 8(r60)
+        lbu r22, 3(r60)
+        sb r0, 1(r60)              # byte write keeps the rest of the word
+        lq r23, 0(r60)
+        sh r6, 0x7FE(r60)          # last halfword of the bitmap
+        lq r24, 0x7F0(r60)
+        clc r25, 0(r60)            # clc from the bitmap: value, untagged
+        sq r6, 0x800(r60)          # past the bitmap: ignored, reads 0
+        lq r26, 0x800(r60)
+        csc r6, 16(r60)            # csc of an untagged value writes like sq
+        lq r27, 16(r60)
+        sq r0, 0(r60)
+        sq r0, 16(r60)
+        sq r0, 0x7F0(r60)
+        lr r28, (r60)              # atomics: RAM only -> access fault
+        amoor r29, r6, (r60)
+        cloadtags r30, 0(r60)      # cloadtags: RAM only -> access fault
+""" + POST + handler + DATA
+    T["rev_trap"] = PRE + setup + """
+        li r60, -0x8000
+        li r6, 0x1000
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, 64      # A = [0x1000, 0x1040): granules 0x100..0x103 = bitmap word 2, bits 0..3
+        li r7, 0x2000
+        csetaddr r11, rc, r7
+        csetbndi r11, r11, 32      # B = [0x2000, 0x2020)
+        cincaddri r12, r10, 16
+        csetbndi r13, r12, 16      # sub-capability of A, base 0x1010 (granule 0x101)
+        li r8, 5
+        csetaddr r14, rc, r8
+        cseal r15, r10, r14        # A sealed with otype 5
+        candperm r16, r10, r0      # A without permissions
+        sq r6, 0(r10)
+        csc r10, 0(r11)            # a copy of A in memory
+        li r9, 0xF
+        sq r9, 32(r60)             # revoke A's granules ...
+        lq r20, 0(r10)             # ... the very next access through A traps (cause 10)
+        sb r0, 63(r10)             # stores too
+        clc r21, 0(r10)
+        csc r11, 16(r10)
+        cloadtags r22, 0(r10)      # (bounds would fail too: revoked is checked first)
+        amoadd r23, r6, (r10)
+        lq r24, 0(r13)             # sub-capability: its base granule is revoked as well
+        lq r25, 64(r10)            # out of bounds AND revoked -> revoked
+        lq r26, 0(r16)             # no LOAD AND revoked -> revoked (checked before permissions)
+        lq r27, 0(r15)             # sealed AND revoked -> sealed (cause 7 first)
+        clc r28, 0(r11)            # the copy in memory still loads tagged (no load filter) ...
+        cgettag r29, r28
+        lq r30, 0(r28)             # ... and traps on use
+        sq r6, 16(r11)             # B unaffected
+        crevtag r31, r10           # crevtag: A -> untagged (value kept)
+        crevtag r32, r11           # B -> unchanged
+        crevtag r33, r13           # sub-capability -> untagged
+        crevtag r34, r15           # sealed capability into revoked memory -> untagged
+        crevtag r35, r6            # integer -> unchanged
+        crevtag r36, rc            # root (base 0, granule 0 not revoked) -> unchanged
+        addi r37, r31, 1           # forwarding of a crevtag result
+        sq r0, 32(r60)             # unrevoke: the next access through A works again
+        lq r38, 0(r10)
+        sb r9, 32(r60)             # byte store revokes again (bits 0..3)
+        sq r6, 0(r12)              # cursor inside A, base = A's base -> traps
+        sb r0, 32(r60)
+        sq r6, 0(r12)
+        li r9, 1
+        sq r9, 0(r60)              # granule 0: every root-derived capability with base 0 is revoked
+        lq r39, 0x10(r5)           # untagged (supervisor hybrid) access: unaffected
+        csetaddr r17, rc, r5
+        lq r40, 0(r17)             # base 0 -> cause 10
+        crevtag r41, rc            # root itself -> untagged
+        li r18, -0x10000
+        csetaddr r19, rc, r18
+        csetbndi r19, r19, 64      # base in the MMIO page: never revoked
+        sq r0, 0x20(r19)
+        li r9, -1
+        sq r9, 0x7F0(r60)
+        lq r42, 0x30(r19)
+        sq r0, 0(r60)
+        sq r0, 0x7F0(r60)
+        lq r43, 0(r17)
+""" + POST + handler + DATA
+    T["rev_pipeline"] = PRE + setup + """
+        li r60, -0x8000
+        li r6, 0x1800
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, 32      # granules 0x180, 0x181 = bitmap word 3, bits 0, 1
+        li r9, 3
+        sq r9, 48(r60)             # revoke, then back-to-back accesses (no bubble in the program)
+        lq r20, 0(r10)
+        sq r0, 48(r60)
+        lq r21, 0(r10)             # unrevoked by the store right before: must not trap
+        sq r9, 48(r60)
+        crevtag r22, r10           # crevtag right after the store sees the new bitmap
+        sq r0, 48(r60)
+        crevtag r23, r10
+        sq r9, 48(r60)
+        addi r24, r24, 1
+        addi r25, r25, 1
+        sd r6, 0(r10)              # two instructions later
+        sq r0, 48(r60)
+        mul r26, r6, r6            # iterating multiplier behind the bitmap store
+        lq r27, 0(r10)
+        sq r9, 48(r60)
+        beq r0, r0, rp_skip
+        lq r28, 0(r10)             # skipped
+rp_skip: lq r29, 8(r10)
+        sq r0, 48(r60)
+        lq r30, 48(r60)            # bitmap word readback right after a store
+        add r31, r30, r9           # load-use on the bitmap read
+""" + POST + handler + DATA
+    T["cloadtags"] = PRE + setup + """
+        li r6, 0x3000
+        csetaddr r10, rc, r6
+        li r7, 512
+        csetbnd r10, r10, r7       # [0x3000, 0x3200): two 256-byte blocks
+        csc r10, 0(r10)            # tags at granules 0, 3, 15 of the first block, 1 of the second
+        csc r10, 48(r10)
+        csc rc, 240(r10)
+        csc r10, 272(r10)
+        cloadtags r20, 0(r10)
+        cloadtags r21, 256(r10)
+        addi r22, r20, 1           # load-use on the cloadtags result
+        cloadtags r23, 0(r6)       # untagged (supervisor) base
+        sq r0, 48(r10)             # a data store clears a tag ...
+        cloadtags r24, 0(r10)      # ... and cloadtags sees it
+        cloadtags r25, 16(r10)     # not 256-byte aligned -> misaligned
+        li r8, 0x9                 # LOAD | LOAD_CAP
+        candperm r11, r10, r8
+        cloadtags r26, 0(r11)
+        li r8, 0x1                 # LOAD only -> permission
+        candperm r12, r10, r8
+        cloadtags r27, 0(r12)
+        li r8, 0x8                 # LOAD_CAP only -> permission
+        candperm r13, r10, r8
+        cloadtags r28, 0(r13)
+        li r7, 128
+        csetbnd r14, r10, r7       # 128-byte capability -> bounds
+        cloadtags r29, 0(r14)
+        cloadtags r30, 512(r10)    # past the capability -> bounds
+        li r9, 0x3ff00
+        cloadtags r31, 0(r9)       # last block of RAM
+        li r9, 0x40000
+        cloadtags r32, 0(r9)       # past RAM -> access fault
+        li r8, 5
+        csetaddr r15, rc, r8
+        cseal r16, r10, r15
+        cloadtags r33, 0(r16)      # sealed
+        cloadtags r0, 0(r10)       # rd = r0
+        cloadtags r10, 0(r10)      # rd = rs1
+""" + POST + handler + DATA
+    T["cloadtags_user"] = PRE + setup + """
+        li r6, 0x3000
+        csetaddr r10, rc, r6
+        li r7, 256
+        csetbnd r10, r10, r7
+        csc r10, 32(r10)
+        li r18, -0x10000
+        csetaddr r19, rc, r18
+        csrw ubase, r6
+        li r8, 0x3100
+        csrw ubound, r8
+        la r9, cu_user
+        csrw epc, r9
+        li r9, 0x10
+        csrw status, r9
+        eret
+cu_user: cloadtags r20, 0(r10)      # user mode, tagged base: fine
+        cloadtags r21, 0(r6)       # untagged base inside [ubase, ubound): fine
+        li r9, 0x3100
+        cloadtags r22, 0(r9)       # untagged base outside the window -> privilege violation
+        cloadtags r23, -256(r6)
+        ecall
+        sq r0, 0x10(r19)           # exit through the MMIO capability (user mode cannot halt)
+""" + POST + handler + DATA
     return T
 
 

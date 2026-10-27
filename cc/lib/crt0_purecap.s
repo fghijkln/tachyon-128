@@ -52,12 +52,20 @@ __crset:
         cincaddri t0, t0, 64
         j    __crl
 __crd:  li   t0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000
-        csetaddr t1, rc, t0       # MMIO capability: the 64 KiB device page, LOAD | STORE | LOAD_CAP | STORE_CAP | GLOBAL (16-byte accesses are clc/csc in purecap)
-        li   t2, 0x10000
+        csetaddr t1, rc, t0       # MMIO capability: the device registers [MMIO, MMIO + 0x8000), LOAD | STORE | LOAD_CAP | STORE_CAP | GLOBAL (16-byte accesses are clc/csc in purecap)
+        li   t2, 0x8000           # (v6: stops below the revocation bitmap, which only the allocator may write)
         csetbnd t1, t1, t2
         li   t2, 0x9B
         candperm t1, t1, t2
         la   t0, ___tx_mmio
+        csetaddr t0, gp, t0
+        csc  t1, 0(t0)
+        li   t0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFF8000
+        csetaddr t1, rc, t0       # v6: revocation bitmap capability (2 KiB at MMIO + 0x8000) for malloc/free
+        csetbndi t1, t1, 2048
+        li   t2, 0x9B
+        candperm t1, t1, t2
+        la   t0, ___tx_revmap
         csetaddr t0, gp, t0
         csc  t1, 0(t0)
         # enter user mode with an empty untagged window (ubase = ubound = 0): from here on every load or store
@@ -89,8 +97,13 @@ __ttl:  lbu  t2, 0(t0)
         cincaddri t0, t0, 1
         j    __ttl
 __ttd:  csrr t3, cause
-        addi t4, t3, 48           # cause is 1..9: one decimal digit
-        sb   t4, 0(t1)
+        addi t4, t3, 48           # cause is 1..10: one or two decimal digits
+        addi t6, zero, 10
+        bltu t3, t6, __tt1
+        addi t5, zero, 49         # '1'
+        sb   t5, 0(t1)
+        addi t4, t3, 38           # '0' + cause - 10
+__tt1:  sb   t4, 0(t1)
         addi t4, zero, 32
         sb   t4, 0(t1)
         csrr t5, tval
@@ -98,9 +111,112 @@ __ttd:  csrr t3, cause
         addi t3, t3, 128
         sq   t3, 16(t1)           # MMIO exit: 128 + cause
         halt t3
+
+# v6 revocation sweep, called by the purecap free/malloc (cc/lib/stdlib.c, cc/ABI.md section 8.2) as
+#   void __tx_revoke_sweep(unsigned long lo, unsigned long hi, unsigned long lo2, unsigned long hi2)
+#   (all 256-byte aligned; [lo2, hi2) is the stack region, swept after [lo, hi))
+# 1. memory: cloadtags finds the tagged granules of each 256-byte block of the ranges; each capability is
+#    reloaded with clc, passed through crevtag (tag dropped if its base granule is revoked) and written
+#    back with csc, so no capability into revoked memory survives in RAM (frames of the callers included);
+# 2. registers: the callee-saved registers (s0-s15, r44-r53) go through crevtag as well; the caller-saved
+#    ones (dead across this call for compiled code) are cleared.
+# Uses gp, the RAM capability set up above (never touched by compiled code).
+___tx_revoke_sweep:
+        csetaddr t0, gp, a0
+__trs_blk:
+        bgeu t0, a1, __trs_r2
+__trs_bl:
+        cloadtags t1, 0(t0)
+        bnez t1, __trs_g
+__trs_nx:
+        cincaddri t0, t0, 256
+        bltu t0, a1, __trs_bl
+__trs_r2:
+        bgeu a2, a3, __trs_regs   # second range (once): [a2, a3)
+        csetaddr t0, gp, a2
+        mv   a1, a3
+        mv   a2, a3
+        j    __trs_blk
+__trs_g:
+        cmove t2, t0
+__trs_gl:
+        andi t3, t1, 1
+        beqz t3, __trs_gs
+        clc  t4, 0(t2)
+        crevtag t4, t4
+        csc  t4, 0(t2)
+__trs_gs:
+        srli t1, t1, 1
+        cincaddri t2, t2, 16
+        bnez t1, __trs_gl
+        j    __trs_nx
+__trs_regs:
+        crevtag s0, s0
+        crevtag s1, s1
+        crevtag s2, s2
+        crevtag s3, s3
+        crevtag s4, s4
+        crevtag s5, s5
+        crevtag s6, s6
+        crevtag s7, s7
+        crevtag s8, s8
+        crevtag s9, s9
+        crevtag s10, s10
+        crevtag s11, s11
+        crevtag s12, s12
+        crevtag s13, s13
+        crevtag s14, s14
+        crevtag s15, s15
+        crevtag r44, r44
+        crevtag r45, r45
+        crevtag r46, r46
+        crevtag r47, r47
+        crevtag r48, r48
+        crevtag r49, r49
+        crevtag r50, r50
+        crevtag r51, r51
+        crevtag r52, r52
+        crevtag r53, r53
+        mv   a0, zero
+        mv   a1, zero
+        mv   a2, zero
+        mv   a3, zero
+        mv   a4, zero
+        mv   a5, zero
+        mv   a6, zero
+        mv   a7, zero
+        mv   t0, zero
+        mv   t1, zero
+        mv   t2, zero
+        mv   t3, zero
+        mv   t4, zero
+        mv   t5, zero
+        mv   t6, zero
+        mv   t7, zero
+        mv   t8, zero
+        mv   t9, zero
+        mv   t10, zero
+        mv   t11, zero
+        mv   t12, zero
+        mv   t13, zero
+        mv   t14, zero
+        mv   t15, zero
+        mv   r54, zero
+        mv   r55, zero
+        mv   r56, zero
+        mv   r57, zero
+        mv   r58, zero
+        mv   r59, zero
+        mv   r60, zero
+        mv   r61, zero
+        mv   r62, zero
+        ret
+
 __tx_trap_msg:
         .asciz "\n*** capability trap (hardware): cause="
         .align 4
         .align 16
 ___tx_mmio:                        # the MMIO capability (C name __tx_mmio, see cc/include/tx128.h)
+        .quad 0
+___tx_revmap:                      # v6: the revocation-bitmap capability (C name __tx_revmap, malloc/free only)
         .quad 0

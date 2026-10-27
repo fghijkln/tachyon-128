@@ -25,6 +25,10 @@ module tx_core #(
   // shadow tag memory (one tag + capability metadata per 16-byte granule), same address/strobe
   output logic      [MW-1:0] dmem_wmeta,   // written on every RAM store: 0 for data stores, cap for csc
   input  wire logic [MW-1:0] dmem_rmeta,
+  input  wire logic [15:0]  dmem_rtags,    // v6 cloadtags: shadow tags of the 16 granules of dmem_addr's 256-byte block
+  // v6 revocation bitmap lookup (bit of the granule holding a capability base; 0 outside RAM)
+  output logic      [127:0] rev_addr_a,    // EX: base of rs1 (the authority of an access, crevtag's operand)
+  input  wire logic         rev_bit_a,
   // status
   output logic              halted,
   output logic      [31:0]  exit_code,
@@ -60,9 +64,9 @@ module tx_core #(
       OP_AMO:    if (fn < N_AMO) k[K_AMO] = 1; else k[K_ILL] = 1;
       OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI,
       OP_ADDIW, OP_SLLIW, OP_SRLIW, OP_SRAIW, OP_ADDIWU, OP_SLLIWU: k[K_ALUI] = 1;
-      OP_CINCADDRI, OP_CSETBNDI: k[K_CAPI] = 1;
+      OP_CINCADDRI, OP_CSETBNDI, OP_CREVTAG: k[K_CAPI] = 1;
       OP_WIDE:   k[K_WIDE] = 1;
-      OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU, OP_CLC: k[K_LOAD] = 1;
+      OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU, OP_CLC, OP_CLTAGS: k[K_LOAD] = 1;
       OP_SB, OP_SH, OP_SW, OP_SD, OP_SQ, OP_CSC: k[K_STORE] = 1;
       OP_BEQ, OP_BNE, OP_BLT, OP_BGE, OP_BLTU, OP_BGEU: k[K_BR] = 1;
       OP_JAL:    k[K_JAL] = 1;
@@ -251,7 +255,7 @@ module tx_core #(
                            id_rasp ? {ifid_pc[127:18], ras_s[ras_t1], 2'b00} : ifid_pc + (id_imm14 << 2);
 
   // load-use / csrr-use interlock
-  wire ex_is_late = idex_valid & idex_we & ((idex_inst[5:0] >= OP_LB && idex_inst[5:0] <= OP_CLC) ||
+  wire ex_is_late = idex_valid & idex_we & ((idex_inst[5:0] >= OP_LB && idex_inst[5:0] <= OP_CLTAGS) ||   // loads, clc, v6 cloadtags
                     idex_inst[5:0] == OP_CSRR || idex_inst[5:0] == OP_AMO ||   // AMO results come from MEM
                     (idex_inst[5:0] == OP_CAP && idex_inst[28:24] == CF_CGETEPCC));   // so does cgetepcc (v4)
   wire stall_lu = ifid_valid & ex_is_late &
@@ -290,6 +294,9 @@ module tx_core #(
   wire [128:0] a_top  = ma[128:0];
   wire         a_sentry = a_tag & (a_ot == OTYPE_SENTRY);
   wire         b_sentry = b_tag & (mb[M_OT +: 16] == OTYPE_SENTRY);
+  // v6 revocation: rs1's base granule is marked in the revocation bitmap (looked up in the tb)
+  assign rev_addr_a = a_base;
+  wire         a_revoked = a_tag & rev_bit_a;
   wire [MW-1:0] ma_unsealed = {ma[M_TAG], 16'd0, ma[M_OT-1:0]};   // PCC installed by cjalr / cinvoke
   wire [MW-1:0] mb_unsealed = {mb[M_TAG], 16'd0, mb[M_OT-1:0]};
 
@@ -360,7 +367,7 @@ module tx_core #(
   wire  [128:0] cap_ntop = {1'b0, a} + {1'b0, cap_x};
   wire  [128:0] cap_len  = a_top - {1'b0, a_base};
   always_comb begin
-    cap_fn = ex_k[K_CAPR] ? ex_fn[4:0] : (ex_op == OP_CINCADDRI ? 5'd1 : 5'd2);
+    cap_fn = ex_k[K_CAPR] ? ex_fn[4:0] : (ex_op == OP_CINCADDRI ? 5'd1 : ex_op == OP_CREVTAG ? 5'd31 : 5'd2);
     cap_x  = ex_k[K_CAPR] ? b : (ex_op == OP_CINCADDRI ? ex_imm : ex_uimm);
     cap_y = '0; cap_m = '0; cap_fault = 1'b0; cap_cause = C_CAP_TAG; cap_tv = a;
     case (cap_fn)
@@ -429,6 +436,7 @@ module tx_core #(
       end
       CF_CGETTYPE: cap_y = {112'd0, a_ot};
       CF_CMOVE: begin cap_y = a; cap_m = ma; end                     // v6: copy, seal and all
+      5'd31: begin cap_y = a; cap_m = a_revoked ? '0 : ma; end      // v6 crevtag
       default: cap_y = a;                                            // cclrtag
     endcase
     // sealed capabilities are immutable: csetaddr / cincaddr / csetbnd / candperm trap
@@ -448,23 +456,26 @@ module tx_core #(
   wire         amo_st   = is_amo & (amo_fn != AMO_LR);          // writes memory (sc, amoswap, arithmetic)
   wire         capst    = (ex_op == OP_CSC) | (is_amo & ((amo_fn == AMO_SC) | (amo_fn == AMO_SWAP)));  // stores rs2's tag
   wire [127:0] ea = a + (is_amo ? 128'd0 : ex_imm);
-  logic [4:0] msize;
+  logic [8:0] msize;
   always_comb
     case (ex_op)
-      OP_LB, OP_LBU, OP_SB: msize = 5'd1;
-      OP_LH, OP_LHU, OP_SH: msize = 5'd2;
-      OP_LW, OP_LWU, OP_SW: msize = 5'd4;
-      OP_LD, OP_LDU, OP_SD: msize = 5'd8;
-      default:              msize = 5'd16;
+      OP_LB, OP_LBU, OP_SB: msize = 9'd1;
+      OP_LH, OP_LHU, OP_SH: msize = 9'd2;
+      OP_LW, OP_LWU, OP_SW: msize = 9'd4;
+      OP_LD, OP_LDU, OP_SD: msize = 9'd8;
+      OP_CLTAGS:            msize = 9'd256;       // v6 cloadtags: one 256-byte block (16 granules)
+      default:              msize = 9'd16;
     endcase
   wire         is_mem   = ex_k[K_LOAD] | ex_k[K_STORE] | is_amo;
-  wire [128:0] ea_end   = {1'b0, ea} + {124'd0, msize};
+  wire [128:0] ea_end   = {1'b0, ea} + {120'd0, msize};
+  wire         is_cltags = ex_op == OP_CLTAGS;
   wire         need_p   = is_amo ? ((~amo_ld | a_perm[0]) & (~amo_st | a_perm[1])) :
-                          ex_k[K_STORE] ? a_perm[1] : a_perm[0];
+                          ex_k[K_STORE] ? a_perm[1] : (a_perm[0] & (~is_cltags | a_perm[3]));   // cloadtags: + LOAD_CAP
   wire         is_csc   = ex_op == OP_CSC;
   wire         is_clc   = ex_op == OP_CLC;
-  wire [3:0]   amask    = msize[3:0] - 4'd1;           // 16 -> 4'hF
-  wire         misalign = |(ea[3:0] & amask);
+  wire [7:0]   amask    = msize[7:0] - 8'd1;           // 16 -> 8'h0F, 256 -> 8'hFF
+  wire         misalign = |(ea[7:0] & amask);
+
   wire         in_ram   = ~|ea[127:RB];
   wire         in_mmio  = &ea[127:16];
   logic        mem_fault;
@@ -472,12 +483,13 @@ module tx_core #(
   always_comb begin
     mem_fault = 1'b1;
     if (a_sealed) mem_cause = C_CAP_SEALED;
+    else if (a_revoked) mem_cause = C_CAP_REVOKED;                              // v6
     else if (a_tag && !need_p) mem_cause = C_CAP_PERM;
     else if (a_tag && capst && b_tag && !a_perm[4]) mem_cause = C_CAP_PERM;   // STORE_CAP
     else if (a_tag && capst && b_tag && !b_perm[P_GLOBAL] && !a_perm[P_STORE_LOCAL]) mem_cause = C_CAP_PERM; // local cap
     else if (a_tag && (ea < a_base || ea_end > a_top)) mem_cause = C_CAP_BOUNDS;
     else if (misalign) mem_cause = C_ALIGN;
-    else if (!in_ram && (!in_mmio || is_amo)) mem_cause = C_ACCESS;           // atomics: RAM only
+    else if (!in_ram && (!in_mmio || is_amo || is_cltags)) mem_cause = C_ACCESS;   // atomics, cloadtags: RAM only
     else begin mem_fault = 1'b0; mem_cause = C_ACCESS; end
   end
 
@@ -571,8 +583,10 @@ module tx_core #(
   assign dmem_wdata = amo_arith ? amo_new : (exmem_sdata << mshift);
   assign dmem_wmeta = exmem_csc ? exmem_smeta : '0;
 
+  wire         mem_isrev = exmem_ea[127:11] == MMIO_REVMAP[127:11];     // v6 revocation bitmap (2 KiB, in the tb)
   wire [127:0] mmio_word = (exmem_ea[127:4] == MMIO_MTIME[127:4]) ? mtime_q :
-                           (exmem_ea[127:4] == MMIO_MTIMECMP[127:4]) ? mtimecmp_q : '0;
+                           (exmem_ea[127:4] == MMIO_MTIMECMP[127:4]) ? mtimecmp_q :
+                           mem_isrev ? dmem_rdata : '0;
   wire [127:0] ld_raw = (exmem_mmio ? mmio_word : dmem_rdata) >> mshift;
   // clc through an authority without LOAD_MUTABLE (v4; v3 used STORE): an unsealed loaded capability
   // loses STORE, STORE_CAP, STORE_LOCAL and LOAD_MUTABLE (deeply immutable)
@@ -599,6 +613,7 @@ module tx_core #(
       OP_LHU:  ld_val = {112'd0, ld_raw[15:0]};
       OP_LWU:  ld_val = {96'd0,  ld_raw[31:0]};
       OP_LDU:  ld_val = {64'd0,  ld_raw[63:0]};
+      OP_CLTAGS: ld_val = {112'd0, dmem_rtags};
       default: ld_val = ld_raw;
     endcase
 
@@ -619,9 +634,13 @@ module tx_core #(
   wire mem_trap_halt = mem_trap & (csr_tvec == '0);
   wire mem_halt      = mem_v & ~exmem_trap & exmem_halt;
   wire mem_eret      = mem_v & ~exmem_trap & exmem_eret;
-  assign mem_redirect = mem_trap | mem_halt | mem_eret;
-  wire [127:0] mem_target = mem_eret ? (csr_epc & ~128'd3) : (csr_tvec & ~128'd3);
-  wire [MW-1:0] mem_tpcc  = mem_eret ? epcc_q : ROOT_META;   // PCC after the MEM redirect
+  // v6: a store to the revocation bitmap refetches the next instruction, so that no younger instruction has
+  // done its revocation check (EX) against the old bitmap
+  wire mem_revwr     = mem_v & ~exmem_trap & exmem_store & exmem_mmio & mem_isrev;
+  assign mem_redirect = mem_trap | mem_halt | mem_eret | mem_revwr;
+  wire [127:0] mem_target = mem_eret ? (csr_epc & ~128'd3) : mem_trap ? (csr_tvec & ~128'd3) :
+                            (exmem_pc + 128'd4);
+  wire [MW-1:0] mem_tpcc  = mem_eret ? epcc_q : mem_trap ? ROOT_META : pcc_q;   // PCC after the MEM redirect
 
   // ======================================================================== control
   wire stall = stall_lu | stall_md;

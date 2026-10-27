@@ -17,6 +17,10 @@ MMIO_EXIT = MMIO_BASE + 0x10                 # write: halt, exit code = value
 MMIO_HEXOUT = MMIO_BASE + 0x20               # write: print value as 32 hex digits + '\n'
 MMIO_MTIME = MMIO_BASE + 0x30                # read: instructions retired so far (deterministic timer)
 MMIO_MTIMECMP = MMIO_BASE + 0x40             # read/write: timer compare (reset all ones)
+# v6 capability revocation bitmap: one bit per 16-byte RAM granule (bit g = granule g, little-endian
+# bytes, LSB first); RAM_BYTES / 16 / 8 = 2 KiB at MMIO + 0x8000, read/write with ordinary loads/stores
+MMIO_REVMAP = MMIO_BASE + 0x8000
+REVMAP_BYTES = RAM_BYTES // 16 // 8
 
 # ---------------------------------------------------------------- opcodes (bits [5:0])
 OP_ALU = 0x01      # R-type, func = ALU op
@@ -36,6 +40,9 @@ OP_ADDIWU, OP_SLLIWU = 0x06, 0x07
 
 OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU = range(0x18, 0x21)
 OP_CLC = 0x21      # clc rd, imm(rs1): 128-bit capability load (tag + metadata from shadow memory)
+OP_CLTAGS = 0x22   # v6 cloadtags rd, imm(rs1): shadow tags of the 16 granules of a 256-byte block -> 16-bit mask
+CLTAGS_BYTES = 256
+OP_CREVTAG = 0x23  # v6 crevtag rd, rs1: rd = rs1, untagged if rs1's base granule is revoked (revocation sweep helper)
 OP_SB, OP_SH, OP_SW, OP_SD, OP_SQ = range(0x28, 0x2D)
 OP_CSC = 0x2D      # csc rA, imm(rs1): 128-bit capability store (tag + metadata to shadow memory)
 OP_BEQ, OP_BNE, OP_BLT, OP_BGE, OP_BLTU, OP_BGEU = range(0x30, 0x36)
@@ -98,7 +105,7 @@ LOAD_OPS = {"lb": (OP_LB, 1, True), "lh": (OP_LH, 2, True), "lw": (OP_LW, 4, Tru
             "ld": (OP_LD, 8, True), "lq": (OP_LQ, 16, False), "lbu": (OP_LBU, 1, False),
             "lhu": (OP_LHU, 2, False), "lwu": (OP_LWU, 4, False), "ldu": (OP_LDU, 8, False)}
 STORE_OPS = {"sb": (OP_SB, 1), "sh": (OP_SH, 2), "sw": (OP_SW, 4), "sd": (OP_SD, 8), "sq": (OP_SQ, 16)}
-CAP_LOAD_OPS = {"clc": OP_CLC}
+CAP_LOAD_OPS = {"clc": OP_CLC, "cloadtags": OP_CLTAGS}
 CAP_STORE_OPS = {"csc": OP_CSC}
 BRANCH_OPS = {"beq": OP_BEQ, "bne": OP_BNE, "blt": OP_BLT, "bge": OP_BGE, "bltu": OP_BLTU, "bgeu": OP_BGEU}
 
@@ -125,9 +132,10 @@ CAUSE_ACCESS = 6
 CAUSE_CAP_SEALED = 7
 CAUSE_ECALL = 8
 CAUSE_PRIV = 9
+CAUSE_CAP_REVOKED = 10       # v6: access through a capability whose base granule is marked in the revocation bitmap
 CAUSE_NAMES = {1: "illegal-instruction", 2: "capability-tag", 3: "capability-bounds",
                4: "capability-permission", 5: "misaligned", 6: "access-fault", 7: "capability-sealed",
-               8: "environment-call", 9: "privilege-violation"}
+               8: "environment-call", 9: "privilege-violation", 10: "capability-revoked"}
 
 # capability permissions
 PERM_LOAD, PERM_STORE, PERM_EXEC, PERM_LOAD_CAP, PERM_STORE_CAP, PERM_SEAL, PERM_UNSEAL = 1, 2, 4, 8, 16, 32, 64

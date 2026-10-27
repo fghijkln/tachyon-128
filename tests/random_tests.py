@@ -63,8 +63,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest", "perm4", "amo", "word"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 4, 4])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest", "perm4", "amo", "word", "rev"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 4, 4, 3])[0]
         if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user", "bpat", "call", "nest"):
             k = "alu"
         if k == "alu":
@@ -400,6 +400,33 @@ class Gen:
                     self.emit(f"{r.choice(['mulw', 'mulwu', 'divw', 'remw', 'mul', 'div'])} r{d}, r{src}, r{rb}")
                 if d:
                     src = d
+        elif k == "rev":            # v6 revocation: bitmap words over the data block, crevtag, cloadtags
+            # r53 = the bitmap word of data's granule (set up in the prologue; private to this stream, which
+            # may itself be nested inside another stream's r56/r57 sequence)
+            c = r.random()
+            if c < 0.5:                              # revoke some granules, run a few ops, (usually) un-revoke
+                pat = r.choice([M, r.getrandbits(128), 1 << r.randint(0, 127), r.getrandbits(128) & r.getrandbits(128)])
+                t = self.dst()
+                self.emit(f"li r{t}, {pat}")
+                st = r.choice(["sq", "sq", "sd", "sw", "sb"])
+                self.emit(f"{st} r{t}, {r.choice([0, 0, 16, r.choice([0, 4, 8, 12])])}(r53)")
+                for _ in range(r.randint(1, 4)):
+                    self.one(allow_ctrl=False)
+                if r.random() < 0.85:
+                    self.emit("sq r0, 0(r53)")
+                    self.emit("sq r0, 16(r53)")
+            elif c < 0.65:
+                self.emit(f"{r.choice(['lq', 'ld', 'lbu', 'lw'])} r{self.dst()}, {r.choice([0, 8, 16])}(r53)")
+            elif c < 0.85:
+                self.emit(f"crevtag r{self.dst()}, r{r.choice([60, 60, 63, self.src()])}")
+            else:                                    # cloadtags of a 256-byte block inside (or below) data
+                t = self.dst()
+                if t == 0:
+                    return
+                self.emit(f"li r{t}, -256")
+                self.emit(f"and r{t}, r3, r{t}")
+                self.emit(f"csetaddr r{t}, r{r.choice([60, 60, 63, self.src()])}, r{t}")
+                self.emit(f"cloadtags r{self.dst()}, {r.choice([0, 256, 256, 512, 768, 16])}(r{t})")
         elif k == "ill":
             self.emit(f".word 0x{r.choice([0, 0xff000001, 0x37000003, 0x00000007, 0x0080003d]):08x}")
 
@@ -426,6 +453,10 @@ def gen_program(seed, n=None):
     g.emit(f"li r54, {r.choice([0, 1, 1, 2, 3, 3, 0x10000])}")
     g.emit("csetaddr r55, r55, r54")
     g.emit("li r52, -0x10000")              # MMIO base (timer registers at +0x30 / +0x40)
+    g.emit("srli r53, r3, 11")              # v6: r53 = revocation bitmap word of data's granule,
+    g.emit("slli r53, r53, 4")              #     MMIO_REVMAP (MMIO + 0x8000) + (data >> 11) * 16
+    g.emit("li r56, -0x8000")
+    g.emit("add r53, r53, r56")
     g.emit(f"addi r57, r3, {r.randrange(-64, 700, 16)}")      # user-mode window for untagged accesses
     g.emit("csrw ubase, r57")
     g.emit(f"addi r57, r57, {r.randrange(0, 600, 8)}")

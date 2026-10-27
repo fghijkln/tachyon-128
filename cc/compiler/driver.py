@@ -21,7 +21,7 @@ def inline_enabled():
     return os.environ.get("TCC128_NO_INLINE", "") in ("", "0")
 
 
-PC_FEATURES = ("subobject", "stack", "sentry")   # purecap hardening, each on by default; -fno-<feature> / TCC128_NO_<FEATURE>=1 turns it off
+PC_FEATURES = ("subobject", "stack", "sentry", "revoke")   # purecap hardening, each on by default; -fno-<feature> / TCC128_NO_<FEATURE>=1 turns it off
 
 
 def pc_feature(name):
@@ -62,6 +62,8 @@ class Unit:
 def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=None, purecap=False):
     if purecap:
         defines = dict(defines or {}, __PURECAP__="1", __CHERI_PURE_CAPABILITY__="1")
+        if not pc_feature("revoke"):
+            defines["__TX_NO_REVOKE"] = "1"     # v6: libc heap without quarantine/revocation (baseline)
     pp = Preprocessor([*include_paths, INCLUDE_DIR], defines)
     if src is None:
         toks = pp.preprocess_file(path)

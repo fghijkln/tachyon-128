@@ -106,6 +106,15 @@ MUTANTS = [
     ("cmove_clears_tag", "tx_core.sv", "CF_CMOVE: begin cap_y = a; cap_m = ma; end", "CF_CMOVE: begin cap_y = a; end"),
     ("cmove_traps_on_sealed", "tx_core.sv", "if (cap_fn <= 5'd3 && a_sealed)", "if ((cap_fn <= 5'd3 || cap_fn == CF_CMOVE) && a_sealed)"),
     ("cmove_decoded_illegal", "tx_defs.svh", "N_CAP = 8'd19", "N_CAP = 8'd18"),
+    # ---- v6 revocation (capability use-after-free)
+    ("revoked_access_allowed", "tx_core.sv", "else if (a_revoked) mem_cause = C_CAP_REVOKED;", ""),
+    ("crevtag_keeps_tag", "tx_core.sv", "cap_m = a_revoked ? '0 : ma;", "cap_m = ma;"),
+    ("revmap_store_no_refetch", "tx_core.sv", "assign mem_redirect = mem_trap | mem_halt | mem_eret | mem_revwr;",
+     "assign mem_redirect = mem_trap | mem_halt | mem_eret;"),
+    ("cloadtags_no_load_cap_check", "tx_core.sv", "(a_perm[0] & (~is_cltags | a_perm[3]))", "a_perm[0]"),
+    ("cloadtags_granules_reversed", "../tb/tb.sv", "dmem_rtags[i] = tmeta[{dmem_addr[RB-1:8], 4'(i)}][M_TAG];",
+     "dmem_rtags[i] = tmeta[{dmem_addr[RB-1:8], 4'(15 - i)}][M_TAG];"),
+    ("rev_bit_next_granule", "../tb/tb.sv", "g = base[RB-1:4];", "g = base[RB-1:4] + 1'b1;"),
 ]
 
 

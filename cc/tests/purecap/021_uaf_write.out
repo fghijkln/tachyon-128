@@ -1,0 +1,5 @@
+account 7 balance 100
+
+*** capability trap (hardware): cause=10 <A>
+
+---exit 138

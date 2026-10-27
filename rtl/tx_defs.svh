@@ -7,7 +7,8 @@ localparam logic [5:0] OP_ADDI = 6'h08, OP_ANDI = 6'h09, OP_ORI = 6'h0A, OP_XORI
 localparam logic [5:0] OP_ADDIW = 6'h13, OP_SLLIW = 6'h15, OP_SRLIW = 6'h16, OP_SRAIW = 6'h17,
                        OP_ADDIWU = 6'h06, OP_SLLIWU = 6'h07;
 localparam logic [5:0] OP_LB = 6'h18, OP_LH = 6'h19, OP_LW = 6'h1A, OP_LD = 6'h1B, OP_LQ = 6'h1C,
-                       OP_LBU = 6'h1D, OP_LHU = 6'h1E, OP_LWU = 6'h1F, OP_LDU = 6'h20, OP_CLC = 6'h21;
+                       OP_LBU = 6'h1D, OP_LHU = 6'h1E, OP_LWU = 6'h1F, OP_LDU = 6'h20, OP_CLC = 6'h21,
+                       OP_CLTAGS = 6'h22, OP_CREVTAG = 6'h23;   // v6 cloadtags, crevtag
 localparam logic [5:0] OP_SB = 6'h28, OP_SH = 6'h29, OP_SW = 6'h2A, OP_SD = 6'h2B, OP_SQ = 6'h2C, OP_CSC = 6'h2D;
 localparam logic [5:0] OP_BEQ = 6'h30, OP_BNE = 6'h31, OP_BLT = 6'h32, OP_BGE = 6'h33,
                        OP_BLTU = 6'h34, OP_BGEU = 6'h35;
@@ -40,12 +41,13 @@ localparam logic [7:0] MD_MULW = 8'd6, MD_MULWU = 8'd7, MD_DIVW = 8'd8, MD_REMW 
 // trap causes
 localparam logic [3:0] C_ILLEGAL = 1, C_CAP_TAG = 2, C_CAP_BOUNDS = 3, C_CAP_PERM = 4,
                        C_ALIGN = 5, C_ACCESS = 6, C_CAP_SEALED = 7,
-                       C_ECALL = 8, C_PRIV = 9;
+                       C_ECALL = 8, C_PRIV = 9, C_CAP_REVOKED = 10;
 
 // MMIO
 localparam logic [127:0] MMIO_EXIT = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0010};
 localparam logic [127:0] MMIO_MTIME = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0030};
 localparam logic [127:0] MMIO_MTIMECMP = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h0040};
+localparam logic [127:0] MMIO_REVMAP = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h8000};   // v6, 2 KiB
 localparam logic [3:0] IRQ_TIMER = 4'd1;
 
 // metadata packing: {tag, otype[15:0], perm[PW-1:0], base[127:0], top[128:0]}

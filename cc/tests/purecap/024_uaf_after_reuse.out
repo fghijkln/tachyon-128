@@ -1,0 +1,7 @@
+sweeps 3, stale tag 0
+address reused: yes
+new owner wrote n
+
+*** capability trap (hardware): cause=9 <A>
+
+---exit 137

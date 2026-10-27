@@ -59,6 +59,8 @@ def decode(w):
         return ("eret", "eret")
     if op == OP_ECALL:
         return ("ecall", "ecall")
+    if op == OP_CREVTAG:
+        return ("u", "crevtag")
     return None
 
 
@@ -94,6 +96,8 @@ def disasm(w, pc=0):
         return f"{mn} {rs1}, {rd}, 0x{(pc + 4 * f['imm14']) & MASK:x}"
     if kind == "j":
         return f"jal {rd}, 0x{(pc + 4 * f['imm20']) & MASK:x}"
+    if kind == "u":
+        return f"{mn} {rd}, {rs1}"
     if kind == "halt":
         return f"halt {rs1}"
     if kind == "csrr":
