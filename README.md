@@ -15,6 +15,7 @@ verified against each other.**
 > PERMIT_CINVOKE / STORE_LOCAL（局部能力只能经带 STORE_LOCAL 的能力存储；`clc` 衰减改由 LOAD_MUTABLE 决定）、
 > **128 位原子操作** `lr`/`sc`/`amoswap`/`amoadd`/`amoand`/`amoor`/`amoxor`（`lr`/`sc`/`amoswap` 保留能力标签）、**可读 EPCC**（`cgetepcc`）。
 > 包含 Python 汇编器/反汇编器/黄金模拟器，SystemVerilog 五级流水线核心，用 Verilator 与黄金模型逐条提交轨迹对比，全部测试通过；Yosys 综合给出单元数。
+> **v6 新增**：purecap C 的**子对象边界**、**栈加固**（栈区有界、va_list 有界）、**函数指针 sentry**（真 `cmove`）、**能力撤销防 use-after-free**（撤销位图、`crevtag`/`cloadtags`、隔离区+扫描），以及编译器优化 perf 1–8（默认 -O 下 RTL 周期 −4.8%～−30.3%），汇总见下文 “v6 summary”。
 > 详细规范见 [SPEC.md](SPEC.md)（顶部有中文摘要）。
 
 | | |
@@ -46,7 +47,7 @@ python3 tools/sim.py build/fib.bin            # prints fib(180) = 18547707689471
 # build the RTL model and run the whole differential test suite
 make build           # Verilator model of tb/tb.sv + rtl/*.sv  -> build/vtb/Vtb
 make test N=2000     # tool tests, multiplier-array check, unit tests, demo programs, 2000 random programs
-make mutants         # inject 60 known RTL bugs, confirm the suite catches each
+make mutants         # inject 79 known RTL bugs, confirm the suite catches each
 make synth           # Yosys generic-gate synthesis -> build/synth_stat.txt
 ```
 
@@ -253,6 +254,52 @@ The register file stays as memory macros (`$mem_v2`); BTB and RAS are flip-flops
 * **Permissions, atomics, `cgetepcc`:** ≈ +4 000 glue cells (11-bit permission field through the pipeline, local-store and
   PERMIT_CINVOKE checks, AMO decode/RMW datapath, reservation, MEM-stage EPCC read).
 * **Net v3 → v4: −15 433 cells (−10.6 %)** with five new features.
+
+## v6 summary (memory safety + compiler performance)
+
+v6 hardens the pure-capability C environment (`tcc128 -mpurecap`) and speeds up the default compiler. Every hardening
+feature is on by default under `-mpurecap` and has an opt-out flag; full rules in [`cc/ABI.md`](cc/ABI.md) §8.1–8.2,
+ISA changes in [SPEC.md](SPEC.md) (§5.1.7, cause 10).
+
+| Item | What it does | Opt-out | Tests |
+|---|---|---|---|
+| **Sub-object bounds** | `&s.field`, `&p->m` and decaying member arrays are narrowed to the member with `csetbnd`, so overflowing one field into the next traps (cause 3); flexible array members and the `offsetof` idiom are exempt | `-fno-subobject-bounds` | `purecap/008` |
+| **Stack hardening** | `sp` is bounded to the 128 KiB stack region `[0x20000, 0x40000)` (stack exhaustion traps instead of overwriting the heap); `va_list` is bounded to exactly the passed arguments (caller passes the byte count in `r62`) | `-fno-stack-bounds` | `purecap/009`, `010` |
+| **Function-pointer sentries** | every function pointer is a sealed entry capability (`csealentry`), indirect calls are `cjalr`; offsetting, dereferencing, writing through, forging or data-calling a function pointer traps. ISA: real `cmove` (CAP func 18) copies sealed capabilities. The scheduler never hoists trapping capability arithmetic above a store, so a trap stays behind earlier MMIO output | `-fno-sentries` | `purecap/011`–`017` |
+| **Heap temporal safety (UAF)** | 2 KiB revocation bitmap at MMIO+0x8000 (1 bit per 16-byte granule); any access through a capability whose base granule is marked traps with *capability-revoked* (cause 10). New instructions `crevtag` (drop a revoked tag) and `cloadtags` (16 tag bits of a 256-byte block). Purecap `free` marks + quarantines blocks; when the 16 KiB quarantine fills, a CHERIvoke-style sweep of RAM and registers clears every stale capability before memory is reused. Use-after-free, double free, invalid free and stale aliases all trap | `-fno-revoke` | `purecap/020`–`027` |
+| **Compiler perf 1–8** (default `-O`) | 1 base+offset folding for post-increment pointers · 2 return-block duplication + shrink-wrapping · 3 local copy propagation + liveness DCE · 4 loop-invariant code motion · 5 redundant-load elimination · 6 value-range extension elimination · 7 loop strength reduction · 8 strength reduction with register steps + linear-function test replacement. Each pass can be disabled with `TCC128_DISABLE=<name>` | `TCC128_DISABLE` | `cc/tests/c/090_v6_loop_opts` |
+
+### v6 benchmarks (Verilator RTL cycles, `-O`, every run commit-trace checked against the golden model)
+
+v5 = word ops + inlining (`cc/bench/results_inline.json`, `results_purecap_inline.json`); v6 = master after the UAF merge (`cc/bench/results_v6.json`, `results_v6_purecap.json`).
+LICM, value ranges and strength reduction (perf 4, 6–8) run in default mode only, so purecap gains less.
+
+| benchmark | v5 cycles | **v6 cycles** | v6 retired | v6 CPI | **v5 → v6** | v5 purecap | **v6 purecap** | v5 → v6 purecap | v6 purecap vs v6 default |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| fib | 395 465 | 296 931 | 274 303 | 1.082 | **-24.9%** | 395 585 | 297 063 | -24.9% | +0.0% |
+| sieve | 471 347 | 406 082 | 365 014 | 1.113 | **-13.8%** | 471 456 | 471 453 | -0.0% | +16.1% |
+| qsort | 441 403 | 420 204 | 322 640 | 1.302 | **-4.8%** | 441 692 | 429 201 | -2.8% | +2.1% |
+| dhrystone | 353 651 | 291 898 | 222 723 | 1.311 | **-17.5%** | 363 336 | 353 925 | -2.6% | +21.2% |
+| coremark_lite | 393 223 | 273 932 | 210 716 | 1.300 | **-30.3%** | 392 748 | 350 871 | -10.7% | +28.1% |
+| int128 | 151 473 | 142 082 | 36 991 | 3.841 | **-6.2%** | 152 206 | 143 032 | -6.0% | +0.7% |
+| malloc_churn | — | 283 091 | 239 168 | 1.184 | **—** | — | 907 682 | — | +220.6% |
+
+`malloc_churn` (new in v6: LIFO lists, a binary search tree built and torn down, a randomly refilled 32-slot pool) is the worst case for temporal safety: purecap with revocation costs
++40.0% cycles vs `-mpurecap -fno-revoke` (907 682 vs 648 263; quarantine sweeps), the other benchmarks do not free and are
+unchanged.
+
+### v6 verification
+
+| Suite | Result |
+|---|---|
+| Tool self-tests | PASS (ISA constants in sync incl. `cmove`, `crevtag`, `cloadtags`; 16 688-instruction disasm→asm round trip) |
+| Directed unit tests | **207 / 207** + 5/5 cycle bounds |
+| Demo programs | 9 / 9 |
+| Random differential | **2000 / 2000** (seeds 1…2000, 3 518 871 instructions; new streams `cmove`, revocation) |
+| Mutation check | 79 mutants (v6: + 4 `cmove`, + 6 revocation/`cloadtags`/`crevtag`) — see `results/` and the v6 merge notes |
+| C tests | 87 × {`-O`, `-O0`} = **174 / 174** |
+| Purecap C + fault tests | **112 / 112** at `-O` and `-O0`, both also trace-matched on the RTL (`--purecap --rtl`) |
+| Differential fuzzing | 150/150 `-O`, 100/100 `-O0`, 150/150 `-mpurecap` per merge |
 
 ## Known gaps (v4)
 
