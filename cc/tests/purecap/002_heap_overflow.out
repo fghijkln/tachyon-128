@@ -1,0 +1,6 @@
+a: tag 1 length 20, b = neighbour
+a + 20 = <A>
+
+*** capability trap (hardware): cause=3 <A>
+
+---exit 131

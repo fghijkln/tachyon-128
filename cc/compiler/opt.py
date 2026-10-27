@@ -3,7 +3,7 @@ redundant-extension removal, copy propagation, retargeting and dead-code elimina
 from .ir import VREG0, ZERO, Ins, fits14
 
 M128 = (1 << 128) - 1
-IMM_OPS = {"add", "and", "or", "xor", "slt", "sltu", "sll", "srl", "sra"}
+IMM_OPS = {"add", "and", "or", "xor", "slt", "sltu", "sll", "srl", "sra", "cadd"}
 COMMUTATIVE = {"add", "and", "or", "xor", "mul", "seq", "min", "max", "minu", "maxu"}
 PURE = {"li", "la", "mov", "bin", "ext", "ld", "faddr"}
 
@@ -176,7 +176,7 @@ def optimize(code):
                             i.cc, i.b, i.imm = "and", None, cb - 1
                             changed = True
                 if i.b is None and i.imm is not None:
-                    if (i.cc in ("add", "or", "xor", "sll", "srl", "sra") and i.imm == 0):
+                    if (i.cc in ("add", "or", "xor", "sll", "srl", "sra", "cadd") and i.imm == 0):
                         i = Ins("mov", d=i.d, a=i.a)
                         changed = True
                     elif i.cc == "and" and sx(i.imm) == -1:

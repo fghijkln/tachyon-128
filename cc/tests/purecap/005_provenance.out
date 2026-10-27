@@ -1,0 +1,6 @@
+out-of-bounds cursor keeps tag: 1, back in bounds works: z
+pointer rebuilt from integer arithmetic: tag 0
+list via memcpy'd node: 1 -> 2, tag 1
+sorted: alpha(len 6, tag 1) bravo(len 6, tag 1) charlie(len 8, tag 1) delta(len 6, tag 1)
+
+---exit 0

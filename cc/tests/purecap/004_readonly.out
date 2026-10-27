@@ -1,0 +1,7 @@
+perms 59b -> 599, ro[1] = 2
+data[1] = 99 after a write through the full capability
+writing through the read-only view at <A>
+
+*** capability trap (hardware): cause=4 <A>
+
+---exit 132

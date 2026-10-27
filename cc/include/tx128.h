@@ -2,10 +2,19 @@
 #define _TX128_H
 /* TACHYON-128 machine access (MMIO page at the top of the 128-bit address space, SPEC.md section 7) */
 #define TX_MMIO_BASE   (~(unsigned __int128)0 - 0xFFFF)
+#ifdef __PURECAP__
+/* -mpurecap runs in user mode where integer addresses cannot be dereferenced: crt0 hands out a capability */
+extern volatile unsigned char *__tx_mmio;
+#define TX_CONSOLE     ((volatile unsigned char *)(__tx_mmio + 0x00))
+#define TX_EXIT        ((volatile unsigned int *)(__tx_mmio + 0x10))
+#define TX_HEXOUT      ((volatile unsigned __int128 *)(__tx_mmio + 0x20))
+#define TX_MTIME       ((volatile unsigned __int128 *)(__tx_mmio + 0x30))
+#else
 #define TX_CONSOLE     ((volatile unsigned char *)(TX_MMIO_BASE + 0x00))
 #define TX_EXIT        ((volatile unsigned int *)(TX_MMIO_BASE + 0x10))
 #define TX_HEXOUT      ((volatile unsigned __int128 *)(TX_MMIO_BASE + 0x20))
 #define TX_MTIME       ((volatile unsigned __int128 *)(TX_MMIO_BASE + 0x30))
+#endif
 /* instructions retired so far (deterministic time base) */
 static unsigned long tx_instret(void) { return (unsigned long)*TX_MTIME; }
 static void tx_hexout(unsigned __int128 v) { *TX_HEXOUT = v; }

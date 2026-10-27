@@ -2,7 +2,7 @@
 """Differential fuzzing: random programs (randprog.py) compiled by host gcc and by tcc128
 (run on the golden simulator); outputs must match exactly.
 
-  fuzz.py N [START_SEED] [-O0] [--keep]
+  fuzz.py N [START_SEED] [-O0] [-mpurecap] [--keep]
 Failing programs are saved to cc/tests/fuzz_failures/seed_<n>.c.
 """
 import os
@@ -37,6 +37,7 @@ def main():
     n = int(args[0]) if args else 100
     start = int(args[1]) if len(args) > 1 else 1
     optimize = "-O0" not in sys.argv
+    purecap = "-mpurecap" in sys.argv
     os.makedirs(FAILDIR, exist_ok=True)
     src = f"/tmp/tcc128_fuzz_{os.getpid()}.c"
     exe = f"/tmp/tcc128_fuzz_{os.getpid()}"
@@ -53,8 +54,10 @@ def main():
             print(f"seed {seed}: host timeout, skipped")
             continue
         try:
-            asm = compile_files([src], optimize=optimize)
-            m = run_sim(assemble(asm), 20_000_000)
+            asm = compile_files([src], optimize=optimize, purecap=purecap)
+            m = run_sim(assemble(asm), 20_000_000, audit_untagged=purecap)
+            if m.untagged_ram:
+                raise RuntimeError(f"untagged RAM access at pc {min(m.untagged_ram):#x}")
             if m.halted[0] == "timeout":
                 nskip += 1
                 print(f"seed {seed}: sim instruction limit, skipped")
@@ -68,7 +71,7 @@ def main():
             npass += 1
         else:
             nfail += 1
-            path = os.path.join(FAILDIR, f"seed_{seed}{'_O0' if not optimize else ''}.c")
+            path = os.path.join(FAILDIR, f"seed_{seed}{'_O0' if not optimize else ''}{'_pc' if purecap else ''}.c")
             with open(path, "w") as f:
                 f.write(prog)
             detail = err

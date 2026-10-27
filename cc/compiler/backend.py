@@ -276,7 +276,9 @@ LOADS = {(1, True): "lb", (2, True): "lh", (4, True): "lw", (8, True): "ld", (16
 STORES = {1: "sb", 2: "sh", 4: "sw", 8: "sd", 16: "sq"}
 IMM_FORM = {"add": "addi", "and": "andi", "or": "ori", "xor": "xori", "slt": "slti", "sltu": "sltiu",
             "sll": "slli", "srl": "srli", "sra": "srai",
-            "addw": "addiw", "addwu": "addiwu", "sllw": "slliw", "sllwu": "slliwu"}
+            "addw": "addiw", "addwu": "addiwu", "sllw": "slliw", "sllwu": "slliwu", "cadd": "cincaddri"}
+CAP_UNARY_OPS = {"cgettag", "cgetlen", "cgetbase", "cgetperm"}
+PC_MEM = {"lq": "clc", "sq": "csc"}      # purecap: every 16-byte access moves the tag too
 BR = {"eq": "beq", "ne": "bne", "lt": "blt", "ge": "bge", "ltu": "bltu", "geu": "bgeu"}
 NEG = {"eq": "bne", "ne": "beq", "lt": "bge", "ge": "blt", "ltu": "bgeu", "geu": "bltu"}
 
@@ -297,6 +299,7 @@ class Emitter:
         self.frame = self.save_base + 16 * len(self.saves) + va
         self.frame = (self.frame + 15) // 16 * 16
         self.long_branches = len(code) > 6000
+        self.pc = getattr(fg, "pc", False)
 
     def e(self, s):
         self.out.append("        " + s)
@@ -325,21 +328,31 @@ class Emitter:
             self.mem("sq", SCR_D, SP, self.spill_base + 16 * slot)
 
     def mem(self, op, r, base, off):
+        if self.pc:
+            op = PC_MEM.get(op, op)
         if fits14(off):
             self.e(f"{op} {rn(r)}, {off}({rn(base)})")
         else:
             self.e(f"li {rn(SCR_ADDR)}, {off}")
-            self.e(f"add {rn(SCR_ADDR)}, {rn(base)}, {rn(SCR_ADDR)}")
+            self.e(f"{'cincaddr' if self.pc else 'add'} {rn(SCR_ADDR)}, {rn(base)}, {rn(SCR_ADDR)}")
             self.e(f"{op} {rn(r)}, 0({rn(SCR_ADDR)})")
 
     def addi(self, d, a, imm):
+        """d = a + imm for addresses (sp, frame objects): cincaddr(i) in purecap."""
         if fits14(imm):
             if imm == 0 and d == a:
                 return
-            self.e(f"addi {rn(d)}, {rn(a)}, {imm}")
+            self.e(f"{'cincaddri' if self.pc else 'addi'} {rn(d)}, {rn(a)}, {imm}")
         else:
             self.e(f"li {rn(SCR_ADDR)}, {imm}")
-            self.e(f"add {rn(d)}, {rn(a)}, {rn(SCR_ADDR)}")
+            self.e(f"{'cincaddr' if self.pc else 'add'} {rn(d)}, {rn(a)}, {rn(SCR_ADDR)}")
+
+    def setbounds(self, d, size):
+        if size < (1 << 14):
+            self.e(f"csetbndi {rn(d)}, {rn(d)}, {size}")
+        else:
+            self.e(f"li {rn(SCR_ADDR)}, {size}")
+            self.e(f"csetbnd {rn(d)}, {rn(d)}, {rn(SCR_ADDR)}")
 
     def base_off(self, base, off):
         if base == FRAME:
@@ -396,13 +409,29 @@ class Emitter:
 
     def i_la(self, i):
         d, slot = self.dst(i.d)
-        self.e(f"la {rn(d)}, {i.sym}" + (f"+{i.imm}" if i.imm else ""))
+        if not self.pc:
+            self.e(f"la {rn(d)}, {i.sym}" + (f"+{i.imm}" if i.imm else ""))
+        elif i.extra == "func":       # code pointer: derived from the PCC
+            self.e(f"la {rn(SCR_ADDR)}, {i.sym}")
+            self.e(f"cgetpcc {rn(d)}")
+            self.e(f"csetaddr {rn(d)}, {rn(d)}, {rn(SCR_ADDR)}")
+        else:                         # data: derived from gp (RAM capability), bounded to the object
+            self.e(f"la {rn(SCR_ADDR)}, {i.sym}")
+            self.e(f"csetaddr {rn(d)}, gp, {rn(SCR_ADDR)}")
+            if i.sz:
+                self.setbounds(d, i.sz)
+        if self.pc and i.imm:
+            self.addi(d, d, i.imm)
         self.finish_dst(slot)
 
     def i_faddr(self, i):
         d, slot = self.dst(i.d)
         if i.sym == "INCOMING":
             self.addi(d, SP, self.frame + i.imm)
+        elif self.pc and i.sz:        # bounded to the frame object [start, start + size)
+            self.addi(d, SP, self.local_base + i.extra)
+            self.setbounds(d, i.sz)
+            self.addi(d, d, i.imm - i.extra)
         else:
             self.addi(d, SP, self.local_base + i.imm)
         self.finish_dst(slot)
@@ -414,10 +443,21 @@ class Emitter:
             self.mem("sq", a, SP, self.spill_base + 16 * slot)
             return
         if a != d:
-            self.e(f"mv {rn(d)}, {rn(a)}")
+            self.e(f"{'cmove' if self.pc else 'mv'} {rn(d)}, {rn(a)}")
 
     def i_bin(self, i):
         a = self.src(i.a, SCR_A)
+        if i.cc in CAP_UNARY_OPS:
+            d, slot = self.dst(i.d)
+            self.e(f"{i.cc} {rn(d)}, {rn(a)}")
+            self.finish_dst(slot)
+            return
+        if i.cc == "cadd" and i.b is not None:
+            b = self.src(i.b, SCR_B)
+            d, slot = self.dst(i.d)
+            self.e(f"cincaddr {rn(d)}, {rn(a)}, {rn(b)}")
+            self.finish_dst(slot)
+            return
         if i.b is None:
             d, slot = self.dst(i.d)
             imm = i.imm
@@ -429,7 +469,7 @@ class Emitter:
                 self.e(f"{IMM_FORM[i.cc]} {rn(d)}, {rn(a)}, {imm}")
             else:
                 self.e(f"li {rn(SCR_B)}, {imm}")
-                self.e(f"{i.cc} {rn(d)}, {rn(a)}, {rn(SCR_B)}")
+                self.e(f"{'cincaddr' if i.cc == 'cadd' else i.cc} {rn(d)}, {rn(a)}, {rn(SCR_B)}")
             self.finish_dst(slot)
             return
         b = self.src(i.b, SCR_B)
@@ -476,6 +516,11 @@ class Emitter:
         a = self.src(i.a, SCR_A)
         self.e(f"slli {rn(SCR_ADDR)}, {rn(a)}, 4")
         self.e(f"la {rn(SCR_B)}, {i.sym}")
-        self.e(f"add {rn(SCR_ADDR)}, {rn(SCR_ADDR)}, {rn(SCR_B)}")
+        if self.pc:     # table read through a capability bounded to the table
+            self.e(f"csetaddr {rn(SCR_B)}, gp, {rn(SCR_B)}")
+            self.e(f"csetbndi {rn(SCR_B)}, {rn(SCR_B)}, {16 * (len(i.extra) - 1)}")
+            self.e(f"cincaddr {rn(SCR_ADDR)}, {rn(SCR_B)}, {rn(SCR_ADDR)}")
+        else:
+            self.e(f"add {rn(SCR_ADDR)}, {rn(SCR_ADDR)}, {rn(SCR_B)}")
         self.e(f"lq {rn(SCR_ADDR)}, 0({rn(SCR_ADDR)})")
         self.e(f"jr {rn(SCR_ADDR)}")

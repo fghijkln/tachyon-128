@@ -1,0 +1,6 @@
+sum = 100, words[2] = three (length 6)
+reading words[1][5] past the literal at <A>
+
+*** capability trap (hardware): cause=3 <A>
+
+---exit 131

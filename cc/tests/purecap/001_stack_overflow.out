@@ -1,0 +1,6 @@
+buf ok: A..P, length 16
+first byte past the end: <A>
+
+*** capability trap (hardware): cause=3 <A>
+
+---exit 131

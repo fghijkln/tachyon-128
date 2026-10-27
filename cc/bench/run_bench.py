@@ -3,7 +3,7 @@
 exit code must be 0) and optionally on the Verilator RTL model via tests/harness.run_diff
 (full commit-trace/console/RAM comparison against golden, plus cycles and CPI).
 
-  run_bench.py [--rtl] [-O0] [--both] [--json out.json] [name ...]
+  run_bench.py [--rtl] [-O0] [--both] [--purecap] [--json out.json] [name ...]
 """
 import argparse
 import glob
@@ -27,6 +27,7 @@ def main():
     ap.add_argument("-O0", action="store_true")
     ap.add_argument("--both", action="store_true")
     ap.add_argument("--json")
+    ap.add_argument("--purecap", action="store_true", help="compile with -mpurecap")
     a = ap.parse_args()
     files = sorted(glob.glob(os.path.join(HERE, "*.c")))
     if a.names:
@@ -38,14 +39,14 @@ def main():
         for f in files:
             name = os.path.splitext(os.path.basename(f))[0]
             t0 = time.time()
-            binary = assemble(compile_files([f], optimize=opt))
+            binary = assemble(compile_files([f], optimize=opt, purecap=a.purecap))
             m = run_sim(binary, 200_000_000)
             ok = m.halted[0] == "exit" and m.exit_code == 0
-            row = {"name": name, "opt": "-O" if opt else "-O0", "size": len(binary),
+            row = {"name": name, "opt": "-O" if opt else "-O0", "purecap": a.purecap, "size": len(binary),
                    "retired": m.retired, "ok": ok, "out": m.console.decode("latin-1").strip()}
             if a.rtl:
                 from harness import run_diff
-                r = run_diff(f"bench_{name}{'' if opt else '_O0'}", binary,
+                r = run_diff(f"bench_{name}{'' if opt else '_O0'}{'_pc' if a.purecap else ''}", binary,
                              os.path.join(ROOT, "build", "ccbench"), max_steps=200_000_000)
                 row.update(rtl_ok=r.ok, rtl_msg=r.msg, cycles=r.cycles,
                            cpi=round(r.cpi, 3) if r.cycles else None)

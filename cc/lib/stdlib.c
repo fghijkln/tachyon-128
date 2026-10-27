@@ -7,19 +7,29 @@ static char *heap_cur;
 #define STACK_RESERVE 0x4000   /* keep 16 KiB below the initial stack pointer free */
 #define RAM_TOP 0x40000
 
+/* purecap: heap_cur is an unbounded RAM capability (from _end); malloc returns a capability bounded
+   to exactly the requested size, so free/realloc re-derive the header address from heap_cur. */
+static char *hdr_of(void *p) {
+    return (char *)__builtin_cheri_address_set(heap_cur, (unsigned __int128)p) - 16;
+}
+
 void *malloc(size_t n) {
     if (!heap_cur) heap_cur = _end;
+    size_t want = n;
     n = (n + 15) & ~(size_t)15;
     char *p = heap_cur;
     if ((unsigned long)(unsigned __int128)(p + 16 + n) > RAM_TOP - STACK_RESERVE) return 0;
     *(size_t *)p = n;          /* 16-byte header keeps the size for realloc */
     heap_cur = p + 16 + n;
-    return p + 16;
+    return __builtin_cheri_bounds_set(p + 16, want);
 }
 
 void free(void *p) {
     /* bump allocator: only the most recent block is actually released */
-    if (p && (char *)p + *(size_t *)((char *)p - 16) == heap_cur) heap_cur = (char *)p - 16;
+    if (p) {
+        char *h = hdr_of(p);
+        if (h + 16 + *(size_t *)h == heap_cur) heap_cur = h;
+    }
 }
 
 void *calloc(size_t n, size_t m) {
@@ -30,10 +40,10 @@ void *calloc(size_t n, size_t m) {
 
 void *realloc(void *p, size_t n) {
     if (!p) return malloc(n);
-    size_t old = *(size_t *)((char *)p - 16);
-    if (n <= old) return p;
+    size_t old = *(size_t *)hdr_of(p);
+    if (n <= old) return __builtin_cheri_bounds_set(hdr_of(p) + 16, n);
     void *q = malloc(n);
-    if (q) memcpy(q, p, old);
+    if (q) memcpy(q, hdr_of(p) + 16, old);    /* p itself may be bounded below old */
     return q;
 }
 
@@ -100,6 +110,15 @@ int rand(void) {
 }
 
 static void swap_bytes(char *a, char *b, size_t n) {
+    if ((((unsigned long)(unsigned __int128)a | (unsigned long)(unsigned __int128)b | n) & 15) == 0) {
+        /* whole 16-byte words (in purecap these moves keep capability tags) */
+        for (; n; n -= 16, a += 16, b += 16) {
+            unsigned __int128 t = *(unsigned __int128 *)a;
+            *(unsigned __int128 *)a = *(unsigned __int128 *)b;
+            *(unsigned __int128 *)b = t;
+        }
+        return;
+    }
     while (n--) { char t = *a; *a++ = *b; *b++ = t; }
 }
 

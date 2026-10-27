@@ -1,0 +1,6 @@
+through the real capability: 1234 (tag 1)
+forged tag 0, dereferencing it at <A>
+
+*** capability trap (hardware): cause=9 <A>
+
+---exit 137

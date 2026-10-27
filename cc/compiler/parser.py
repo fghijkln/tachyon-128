@@ -74,6 +74,12 @@ TYPE_KEYWORDS = {"void", "_Bool", "char", "short", "int", "long", "signed", "uns
                  "_Alignas", "float", "double", "_Thread_local", "__thread", "__builtin_va_list"}
 
 
+# __builtin_cheri_<op>(ptr[, x]): argument count, result type (None = the pointer's type)
+CHERI_BUILTINS = {"bounds_set": (2, None), "address_set": (2, None), "perms_and": (2, None),
+                  "tag_get": (1, T.ULONG), "length_get": (1, T.UINT128), "base_get": (1, T.UINT128),
+                  "perms_get": (1, T.ULONG)}
+
+
 class Parser:
     def __init__(self, toks, unit_id=0):
         eof = Tok("eof", "<eof>", toks[-1].file if toks else "?", toks[-1].line if toks else 0)
@@ -1753,6 +1759,19 @@ class Parser:
         if t.kind == "id":
             if t.text in ("__builtin_va_start", "__builtin_va_arg", "__builtin_va_end", "__builtin_va_copy"):
                 return self.builtin_va(t)
+            if t.text.startswith("__builtin_cheri_") and t.text[16:] in CHERI_BUILTINS:
+                op = t.text[16:]
+                nargs, rty = CHERI_BUILTINS[op]
+                self.next()
+                self.expect("(")
+                args = [self.decay(self.assign())]
+                for _ in range(nargs - 1):
+                    self.expect(",")
+                    args.append(self.cast(self.decay(self.assign()), T.UINT128))
+                self.expect(")")
+                if not args[0].ty.is_ptr():
+                    error_at(t, f"{t.text}: first argument must be a pointer")
+                return Node("cheri", t, ty=args[0].ty if rty is None else rty, op=op, args=args)
             if t.text == "__builtin_expect":
                 self.next()
                 self.expect("(")

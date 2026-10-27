@@ -104,6 +104,8 @@ class FuncGen:
         self.sret = None
         self.has_call = False
         self.data = []          # extra data (jump tables)
+        self.pc = getattr(unit, "purecap", False)   # -mpurecap: pointers are capabilities
+        self.slots = []         # (offset, size) of every frame object, for capability bounds
 
     # --------------------------------------------------------- helpers
     def vreg(self):
@@ -129,6 +131,7 @@ class FuncGen:
         self.frame_size = T.align_to(self.frame_size, align)
         off = self.frame_size
         self.frame_size += max(size, 1)
+        self.slots.append((off, max(size, 1)))
         return off
 
     def li(self, v):
@@ -149,6 +152,29 @@ class FuncGen:
     def bini(self, op, a, imm):
         r = self.vreg()
         self.emit("bin", d=r, a=a, b=None, imm=imm, cc=op)
+        return r
+
+    # pointer + integer: cincaddr in purecap (keeps the tag; the pointer must be the first operand)
+    def padd(self, p, off):
+        return self.bin("cadd" if self.pc else "add", p, off)
+
+    def paddi(self, p, imm):
+        return self.bini("cadd" if self.pc else "add", p, imm)
+
+    def faddr(self, d, off):
+        """Address of frame offset off; purecap bounds it to the frame object containing off."""
+        i = self.emit("faddr", d=d, imm=off)
+        if self.pc:
+            for so, sz in self.slots:
+                if so <= off < so + sz:
+                    i.sz, i.extra = sz, so
+        return i
+
+    def gaddr(self, o):
+        """Address of a global object or function (purecap: bounded capability, see backend.i_la)."""
+        r = self.vreg()
+        sz = o.ty.size if not o.is_func and o.ty.size > 0 else 0
+        self.emit("la", d=r, sym=o.asm_name, imm=0, sz=sz, extra="func" if o.is_func else None)
         return r
 
     def ext(self, r, ty):
@@ -365,7 +391,7 @@ class FuncGen:
             return
         off = self.local_off(var)
         base = self.vreg()
-        self.emit("faddr", d=base, imm=off)
+        self.faddr(base, off)
         ty = var.ty
         if ty.is_scalar():
             v = self.expr(init.expr) if init.expr is not None else ZERO
@@ -412,7 +438,7 @@ class FuncGen:
             return base, 0
         if fits14(off):
             return base, off
-        r = self.bin("add", base, self.const(off))
+        r = self.padd(base, self.const(off))
         return r, 0
 
     def store_at(self, base, off, v, ty):
@@ -436,12 +462,13 @@ class FuncGen:
             d = self.vreg()
             s = self.vreg()
             self.mov(d, dst)
+            pa = "cadd" if self.pc else "add"
             if doff:
-                self.emit("bin", d=d, a=d, b=self.const(doff), cc="add")
+                self.emit("bin", d=d, a=d, b=self.const(doff), cc=pa)
             if src is not None:
                 self.mov(s, src)
                 if soff:
-                    self.emit("bin", d=s, a=s, b=self.const(soff), cc="add")
+                    self.emit("bin", d=s, a=s, b=self.const(soff), cc=pa)
             c = self.vreg()
             self.mov(c, cnt)
             top = self.new_label()
@@ -450,10 +477,10 @@ class FuncGen:
                 t = self.vreg()
                 self.emit("ld", d=t, a=s, imm=0, sz=unit, sign=False)
                 self.emit("st", a=t, b=d, imm=0, sz=unit)
-                self.emit("bin", d=s, a=s, b=None, imm=unit, cc="add")
+                self.emit("bin", d=s, a=s, b=None, imm=unit, cc=pa)
             else:
                 self.emit("st", a=ZERO, b=d, imm=0, sz=unit)
-            self.emit("bin", d=d, a=d, b=None, imm=unit, cc="add")
+            self.emit("bin", d=d, a=d, b=None, imm=unit, cc=pa)
             self.emit("bin", d=c, a=c, b=None, imm=-1, cc="add")
             self.emit("bcc", a=c, b=ZERO, cc="ne", label=top)
             rest = size - n * unit
@@ -497,9 +524,7 @@ class FuncGen:
                 if o in self.var_ptr:
                     return LV("mem", self.var_ptr[o], 0)
                 return LV("mem", FRAME, self.local_off(o))
-            r = self.vreg()
-            self.emit("la", d=r, sym=o.asm_name, imm=0)
-            return LV("mem", r, 0)
+            return LV("mem", self.gaddr(o), 0)
         if k == "deref":
             p = n.lhs
             if p.kind in ("add", "sub") and p.ty.is_ptr() and p.rhs.kind == "num":
@@ -509,7 +534,7 @@ class FuncGen:
                 base = self.expr(p.lhs)
                 if fits14(off):
                     return LV("mem", base, off)
-                return LV("mem", self.bin("add", base, self.const(off)), 0)
+                return LV("mem", self.padd(base, self.const(off)), 0)
             return LV("mem", self.expr(p), 0)
         if k == "member":
             m = n.mem
@@ -517,7 +542,7 @@ class FuncGen:
             off = lv.off + m.offset
             base = lv.reg
             if not fits14(off + 16):
-                base = self.bin("add", self.base_reg(lv), self.const(off))
+                base = self.padd(self.base_reg(lv), self.const(off))
                 off = 0
             if m.bit_width is not None:
                 return LV("bit", base, off, m)
@@ -540,7 +565,7 @@ class FuncGen:
     def base_reg(self, lv):
         if lv.reg == FRAME:
             r = self.vreg()
-            self.emit("faddr", d=r, imm=lv.off)
+            self.faddr(r, lv.off)
             lv.reg, lv.off = r, 0
             return r
         return lv.reg
@@ -549,11 +574,11 @@ class FuncGen:
         """Materialise the address of a memory lvalue in a register."""
         if lv.reg == FRAME:
             r = self.vreg()
-            self.emit("faddr", d=r, imm=lv.off)
+            self.faddr(r, lv.off)
             return r
         if lv.off == 0:
             return lv.reg
-        return self.bini("add", lv.reg, lv.off)
+        return self.paddi(lv.reg, lv.off)
 
     def load(self, lv, ty):
         if lv.kind == "reg":
@@ -591,7 +616,7 @@ class FuncGen:
     def store_bitfield(self, base, off, m, v):
         if base == FRAME:
             b = self.vreg()
-            self.emit("faddr", d=b, imm=off)
+            self.faddr(b, off)
             base, off = b, 0
         u = self.vreg()
         self.emit("ld", d=u, a=base, imm=off, sz=m.ty.size, sign=False)
@@ -682,9 +707,7 @@ class FuncGen:
     def e_addr(self, n):
         e = n.lhs
         if e.kind == "var" and e.var.is_func if hasattr(e, "var") else False:
-            r = self.vreg()
-            self.emit("la", d=r, sym=e.var.asm_name, imm=0)
-            return r
+            return self.gaddr(e.var)
         if e.kind == "deref":
             return self.expr(e.lhs)
         lv = self.lval(e)
@@ -718,6 +741,8 @@ class FuncGen:
         return r
 
     def arith0(self, op, a, b, ty):
+        if self.pc and ty.kind == "ptr" and op in ("add", "sub"):
+            return self.padd(a, b if op == "add" else self.bin("sub", ZERO, b))
         if op == "add":
             r = self.bin("add", a, b)
         elif op == "sub":
@@ -839,7 +864,9 @@ class FuncGen:
         lt = n.lhs.ty
         opty = n.opty
         if lt.kind == "ptr":
-            r = self.bin("add" if n.op == "add" else "sub", cur, self.expr(n.rhs))
+            rhs = self.expr(n.rhs)
+            r = self.padd(cur, rhs if n.op == "add" else self.bin("sub", ZERO, rhs)) if self.pc \
+                else self.bin("add" if n.op == "add" else "sub", cur, rhs)
         else:
             c = cur if not needs_ext(lt, opty) else self.ext(cur, opty)
             rhs = self.expr(n.rhs)
@@ -860,7 +887,10 @@ class FuncGen:
         if ty.kind == "bool":
             nv = self.const(1) if n.delta > 0 else self.bini("xor", cur, 1)
         else:
-            nv = self.bini("add", cur, n.delta) if fits14(n.delta) else self.bin("add", cur, self.const(n.delta))
+            if self.pc and ty.kind == "ptr":
+                nv = self.paddi(cur, n.delta) if fits14(n.delta) else self.padd(cur, self.const(n.delta))
+            else:
+                nv = self.bini("add", cur, n.delta) if fits14(n.delta) else self.bin("add", cur, self.const(n.delta))
             nv = self.ext(nv, ty)
         if n.post and not discard:
             old = self.vreg()
@@ -882,6 +912,21 @@ class FuncGen:
             self.stmt(body[-1])
         return ZERO
 
+    def e_cheri(self, n):
+        """__builtin_cheri_*: capability intrinsics (no-ops / plain values in hybrid mode)."""
+        a = self.expr(n.args[0])
+        b = self.expr(n.args[1]) if len(n.args) > 1 else None
+        op = n.op
+        if op in ("bounds_set", "perms_and") and not self.pc:
+            return a                      # hybrid pointers are untagged: nothing to narrow
+        if op == "address_set" and not self.pc:
+            return b
+        cc = {"bounds_set": "csetbnd", "address_set": "csetaddr", "perms_and": "candperm",
+              "tag_get": "cgettag", "length_get": "cgetlen", "base_get": "cgetbase", "perms_get": "cgetperm"}[op]
+        r = self.vreg()
+        self.emit("bin", d=r, a=a, b=b, cc=cc)
+        return r
+
     def e_va_start(self, n):
         lv = self.lval(n.ap)
         r = self.vreg()
@@ -894,7 +939,7 @@ class FuncGen:
         ap0 = self.load(lv, n.ap.ty)
         ap = self.vreg()
         self.mov(ap, ap0)
-        nxt = self.bini("add", ap, 16)
+        nxt = self.paddi(ap, 16)
         self.store(lv, nxt, n.ap.ty)
         ty = n.ty
         r = self.vreg()
@@ -912,14 +957,14 @@ class FuncGen:
         if fty.ret.is_struct():
             sret_slot = self.alloc_slot(fty.ret.size, fty.ret.align)
             r = self.vreg()
-            self.emit("faddr", d=r, imm=sret_slot)
+            self.faddr(r, sret_slot)
             args.append(r)
         for a in n.args:
             if a.ty.is_struct():
                 src = self.expr(a)
                 off = self.alloc_slot(a.ty.size, max(a.ty.align, 16))
                 d = self.vreg()
-                self.emit("faddr", d=d, imm=off)
+                self.faddr(d, off)
                 self.copy_mem(d, 0, src, 0, a.ty.size, a.ty.align)
                 args.append(d)
             else:

@@ -24,17 +24,21 @@ class Item:
 
     def __init__(self, name, kind, lines, refs, tentative=False, size=0, align=1):
         self.name, self.kind, self.lines, self.refs = name, kind, lines, refs
+        self.caprelocs = []     # purecap: (offset, label, addend) of pointer slots initialised by crt0
         self.tentative, self.size, self.align = tentative, size, align
 
 
 class Unit:
-    def __init__(self, uid):
+    def __init__(self, uid, purecap=False):
         self.uid = uid
+        self.purecap = purecap
         self.fnid = 0
         self.items = []
 
 
-def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=None):
+def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=None, purecap=False):
+    if purecap:
+        defines = dict(defines or {}, __PURECAP__="1", __CHERI_PURE_CAPABILITY__="1")
     pp = Preprocessor([*include_paths, INCLUDE_DIR], defines)
     if src is None:
         toks = pp.preprocess_file(path)
@@ -43,7 +47,7 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
         toks = pp.process(tokenize(src, path))
     p = Parser(toks, uid)
     objs = p.parse()
-    unit = Unit(uid)
+    unit = Unit(uid, purecap)
     seen = set()
     for o in objs:
         if id(o) in seen:
@@ -78,11 +82,11 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
                 continue
             if not o.is_definition:
                 continue
-            unit.items.append(data_item(o))
+            unit.items.append(data_item(o, purecap))
     return unit
 
 
-def data_item(o):
+def data_item(o, purecap=False):
     ty = o.ty
     size = max(ty.size, 1)
     align = max(ty.align, 1)
@@ -110,10 +114,13 @@ def data_item(o):
         refs.add(label)
         pos = off + sz
     emit_bytes(data[pos:])
-    return Item(o.asm_name, "data", lines, refs, size=size, align=align)
+    it = Item(o.asm_name, "data", lines, refs, size=size, align=align)
+    if purecap:
+        it.caprelocs = [(off, label, addend) for off, label, addend, sz in relocs if sz == 16]
+    return it
 
 
-def libc_units(include_paths=(), optimize=True):
+def libc_units(include_paths=(), optimize=True, purecap=False):
     """Compile (and cache) the C runtime library."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     srcs = sorted(f for f in os.listdir(LIB_DIR) if f.endswith(".c"))
@@ -123,12 +130,12 @@ def libc_units(include_paths=(), optimize=True):
     hdr = max([os.path.getmtime(os.path.join(INCLUDE_DIR, f)) for f in os.listdir(INCLUDE_DIR)] + [0])
     for k, f in enumerate(srcs):
         path = os.path.join(LIB_DIR, f)
-        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + ".pkl")
+        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + (".pc" if purecap else "") + ".pkl")
         if os.path.exists(cache) and os.path.getmtime(cache) > max(os.path.getmtime(path), newest_compiler, hdr):
             with open(cache, "rb") as fh:
                 units.append(pickle.load(fh))
             continue
-        u = compile_unit(path, 900 + k, include_paths, None, optimize)
+        u = compile_unit(path, 900 + k, include_paths, None, optimize, purecap=purecap)
         tmp = cache + f".{os.getpid()}.tmp"
         with open(tmp, "wb") as fh:
             pickle.dump(u, fh)
@@ -137,8 +144,8 @@ def libc_units(include_paths=(), optimize=True):
     return units
 
 
-def link(units, entry="_main"):
-    crt0 = open(os.path.join(LIB_DIR, "crt0.s")).read()
+def link(units, entry="_main", purecap=False):
+    crt0 = open(os.path.join(LIB_DIR, "crt0_purecap.s" if purecap else "crt0.s")).read()
     defs = {}
     for u in units:
         for it in u.items:
@@ -168,7 +175,7 @@ def link(units, entry="_main"):
     missing = set()
     for s in keep:
         for r in defs[s].refs:
-            if r not in defs and not r.startswith("__L") and r != "__end":
+            if r not in defs and not r.startswith("__L") and r != "__end" and r not in crt0_labels(crt0):
                 missing.add(r)
     for r in roots:
         if r not in defs and r != "_start" and r.startswith("_") and not r.startswith("__"):
@@ -189,6 +196,17 @@ def link(units, entry="_main"):
     for it in ordered:
         if it.kind == "data":
             out.extend(it.lines)
+    if purecap:
+        # capability relocation table, walked by crt0_purecap.s: {slot, target, size, addend} per
+        # initialised pointer slot; size = -1 marks a function (derived from the PCC, not gp)
+        out.append("        .align 16")
+        out.append("__cap_relocs:")
+        for it in ordered:
+            for off, label, addend in it.caprelocs:
+                tgt = defs.get(label)
+                size = -1 if tgt is not None and tgt.kind == "func" else (tgt.size if tgt is not None else 0)
+                out.append(f"        .quad {it.name}+{off}, {label}, {size}, {addend}")
+        out.append("__cap_relocs_end:")
     out.append("        .align 16")
     out.append("__end:")
     return "\n".join(out) + "\n"

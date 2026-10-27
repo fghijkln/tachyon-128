@@ -1,0 +1,6 @@
+record of 12 bytes, length via member 12, id 7
+underflow write at <A>
+
+*** capability trap (hardware): cause=3 <A>
+
+---exit 131
