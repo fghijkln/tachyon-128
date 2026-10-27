@@ -29,6 +29,8 @@ def main():
                 extra["interrupts"] += 1
                 continue
             is_trap = parts[0] == "T"
+            if is_trap:
+                extra[f"trap cause {parts[1]}"] += 1
             pc = int(parts[2 if is_trap else 0], 16)
             w = struct.unpack_from("<I", m.ram, pc)[0] if pc + 4 <= len(m.ram) else 0
             op, fn = w & 63, w >> 24
@@ -50,7 +52,7 @@ def main():
     for k in sorted(set(ok) | set(trap)):
         if k in WATCH or k == "clc":
             print(f"{k:12s} ok={ok[k]:6d} trap={trap[k]:6d}")
-    for k, v in extra.items():
+    for k, v in sorted(extra.items()):
         print(f"{k}: {v}")
 
 

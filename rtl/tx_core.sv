@@ -167,10 +167,10 @@ module tx_core #(
   //      every word of the 256 KiB RAM), 16-bit word target (pc[17:2]) and a 2-bit saturating counter.
   //      Predicts taken branches, JAL and JALR in IF; every prediction is verified in EX.
   //      +define+TX_NO_BTB gives the v2 front end (static BTFN in ID only).
-  logic          btb_v   [0:15];
-  logic [11:0]   btb_tag [0:15];
-  logic [15:0]   btb_tgt [0:15];
-  logic [1:0]    btb_ctr [0:15];
+  (* mem2reg *) logic          btb_v   [0:15];      // small: flip-flops, not a memory macro
+  (* mem2reg *) logic [11:0]   btb_tag [0:15];
+  (* mem2reg *) logic [15:0]   btb_tgt [0:15];
+  (* mem2reg *) logic [1:0]    btb_ctr [0:15];
   wire  [3:0]    if_bi   = pc_q[5:2];
 `ifdef TX_NO_BTB
   wire           if_bhit = 1'b0;
@@ -430,7 +430,11 @@ module tx_core #(
   // cjalr / cinvoke always redirect (they also switch the fetch PCC); trapping instructions never do
   wire ex_redirect = idex_valid & ~ex_trap & (ex_cjalr | (ex_anpc != idex_pnpc));
   wire [127:0] ex_target = ex_cjalr ? (a & ~128'd3) : ex_anpc;
+`ifdef TX_NO_BTB
+  wire btb_upd = 1'b0;
+`else
   wire btb_upd = idex_valid & ~ex_trap & ~stall_md & ~mem_redirect & (ex_k[K_BR] | ex_k[K_JAL] | ex_k[K_JALR]);
+`endif
   wire [3:0] ex_bi = idex_pc[5:2];
   wire ex_bhit = btb_v[ex_bi] & (btb_tag[ex_bi] == idex_pc[17:6]);
 

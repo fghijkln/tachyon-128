@@ -7,6 +7,9 @@ verified against each other.**
 > 定长 32 位指令；三大特色是 **硬件能力指针（CHERI 风格，边界+权限检查，不可伪造）**、**寄存器内 SIMD 通道**
 > （16×8/8×16/4×32/2×64）和 **宽立即数拼接**。v2 新增：**带标签内存**（`clc`/`csc`，每 16 字节一个影子 tag+元数据）、
 > **PCC 取指能力检查**（`cjalr`）、**密封能力**（`cseal`/`cunseal`）、**radix-4 提前终止除法器**、**确定性定时器中断**。
+> **v3 新增**：**4 遍 radix-2³² 乘法器**（6 周期，原 35 周期）、**密封入口能力 sentry 与 `cinvoke` 保护域调用**、
+> **`clc` 深度只读权限衰减**、**用户/内核两级特权**（`ecall`、特权违例陷阱、用户态 MMIO 只能经能力访问，附带抢占式双任务小内核示例）、
+> **分支目标缓冲 BTB + 2 位饱和计数器预测**。
 > 包含 Python 汇编器/反汇编器/黄金模拟器，SystemVerilog 五级流水线核心，用 Verilator 与黄金模型逐条提交轨迹对比，全部测试通过；Yosys 综合给出单元数。
 > 详细规范见 [SPEC.md](SPEC.md)（顶部有中文摘要）。
 
@@ -15,12 +18,13 @@ verified against each other.**
 | Registers | 64 × 128-bit GPRs (`r0` = 0), each a *fat register* with a hidden capability tag + perms + base + top |
 | Address space | 128-bit virtual, byte addressed, little-endian; 128-bit PC |
 | Encoding | fixed 32-bit (op6 · rd6 · rs1·6 · rs2·6 · func8) — see SPEC §1.1 for why not 64-bit |
-| Integer | add/sub/logic/shifts/compare/min/max/clz/ctz/popcnt, **128-bit mul, mulhu, div, divu, rem, remu** |
+| Integer | add/sub/logic/shifts/compare/min/max/clz/ctz/popcnt, **128-bit mul, mulhu, div, divu, rem, remu** (v3: 6-cycle 4-pass multiplier) |
 | Memory | 8/16/32/64/128-bit loads (signed/unsigned) and stores, naturally aligned |
-| Feature 1 | **Capabilities** — CHERI-style unforgeable, monotonic, bounds- and permission-checked pointers; **v2:** tagged memory (`clc`/`csc`, shadow tag + metadata per 16-byte granule), capability-checked instruction fetch (PCC, `cjalr`), sealed capabilities (`cseal`/`cunseal`) |
+| Feature 1 | **Capabilities** — CHERI-style unforgeable, monotonic, bounds- and permission-checked pointers; **v2:** tagged memory (`clc`/`csc`, shadow tag + metadata per 16-byte granule), capability-checked instruction fetch (PCC, `cjalr`), sealed capabilities (`cseal`/`cunseal`); **v3:** sealed entry capabilities (`csealentry`, sentry `cjalr`), `cinvoke` sealed code+data domain calls, deep read-only `clc` attenuation |
 | Feature 2 | **SIMD-in-GPR** — 16×8, 8×16, 4×32, 2×64 lanes: add/sub (wrap + saturating), min/max, compare masks, mul, splat, horizontal sum, shifts |
 | Feature 3 | **Wide immediates** — `wli`/`wins` deposit 16 bits into any of 8 slots; `li` picks the shortest sequence |
-| Traps | illegal, cap-tag, cap-bounds, cap-permission, misaligned, access-fault, cap-sealed; precise; `tvec/epc/cause/tval/status`, `eret` |
+| Traps | illegal, cap-tag, cap-bounds, cap-permission, misaligned, access-fault, cap-sealed, **v3:** environment-call, privilege-violation; precise; `tvec/epc/cause/tval/status/ubase/ubound`, `eret` |
+| Privilege | **v3:** supervisor + user mode (`status.U/PU`), `ecall`; user mode cannot touch CSRs, `eret`, `halt`, `csetepcc`, and reaches memory/MMIO through untagged pointers only inside `[ubase, ubound)` — devices only through capabilities the kernel grants |
 | Interrupts | **v2:** machine timer — `mtime` = retired-instruction count (deterministic), `mtimecmp`, `status.IE/PIE/TIE`, precise delivery |
 | I/O | MMIO page at the very top of the 128-bit space: console, hex printer, exit, mtime, mtimecmp |
 
@@ -38,7 +42,7 @@ python3 tools/sim.py build/fib.bin            # prints fib(180) = 18547707689471
 # build the RTL model and run the whole differential test suite
 make build           # Verilator model of tb/tb.sv + rtl/*.sv  -> build/vtb/Vtb
 make test N=2000     # tool tests, unit tests, demo programs, 2000 random programs
-make mutants         # inject 20 known RTL bugs, confirm the suite catches each
+make mutants         # inject 33 known RTL bugs, confirm the suite catches each
 make synth           # Yosys generic-gate synthesis -> build/synth_stat.txt
 ```
 
@@ -63,6 +67,12 @@ nodes after forge   = 3                  <- an integer store into a link cleared
   !! trap cause=2 / 3 / 4                <- forged pointer, neighbour access, csc through a load-only view
 ....................                     <- timer: one '.' per interrupt (mtime counts retired instructions)
 timer ticks       = 20
+TACHYON-128 kernel: 2 user tasks, timer quantum 200        <- kernel: supervisor + two preempted user tasks
+Aabcd0efgh ijklAmn                                          <- task A via ecall, task B via a console capability
+[kernel] task 1 killed: cause=9 tval=ffffffffffffffffffffffffffff0000   <- untagged MMIO store from user mode
+1 A2 A3 A4 A5 A6 A7 A8 A9
+[kernel] exit from task 0
+[kernel] all tasks finished. preemptions=34 ecalls=32 taskA counter=10
 ```
 
 ## Repository layout
@@ -73,14 +83,15 @@ tools/isa.py          single source of truth: opcodes, funcs, CSRs, causes, memo
 tools/asm.py          two-pass assembler: labels, expressions, .include, data directives, pseudo-ops
 tools/disasm.py       disassembler
 tools/sim.py          golden reference ISA simulator (writes the commit trace)
-programs/*.s          lib.s runtime + fib, fact, sort, simd, capfault, caplist (tagged memory), timer (interrupts)
+programs/*.s          lib.s runtime + fib, fact, sort, simd, capfault, caplist (tagged memory), timer (interrupts),
+                      kernel (v3: supervisor/user, two preempted user tasks, ecall, capability-granted MMIO)
 rtl/tx_core.sv        5-stage pipeline, register file, CSRs, traps/interrupts, PCC, capability + memory checks, timer
 rtl/tx_alu.sv         128-bit ALU
 rtl/tx_simd.sv        SIMD unit (per-width lane arrays)
-rtl/tx_muldiv.sv      radix-16 multiplier, radix-4 early-terminating divider, result cache
+rtl/tx_muldiv.sv      4-pass radix-2^32 multiplier, radix-4 early-terminating divider, result cache
 rtl/tx_defs.svh       constants (checked against tools/isa.py by tests/test_tools.py)
 tb/                   Verilator testbench: RAM + shadow tag memory, MMIO console, trace writer, C++ driver, toolchain setup
-tests/                harness, directed unit tests, random generator, mutation check, runner
+tests/                harness, directed unit tests, random generator, mutation check, runner, coverage.py
 synth/                Yosys scripts
 ```
 
@@ -88,9 +99,9 @@ synth/                Yosys scripts
 
 ```mermaid
 flowchart LR
-  IF["IF<br/>PC (128b)<br/>fetch-fault check"] --> ID["ID<br/>decode · regfile 2R<br/>JAL + BTFN redirect"]
+  IF["IF<br/>PC (128b) · BTB 16×2-bit<br/>fetch-fault check"] --> ID["ID<br/>decode · regfile 2R<br/>static fallback redirect"]
   ID --> EX["EX<br/>ALU · SIMD · CAP<br/>address + bounds/perm check<br/>branch verify · JALR<br/>iterative MUL/DIV"]
-  EX --> MEM["MEM<br/>load/store · MMIO<br/>CSRs · precise traps<br/>ERET · HALT"]
+  EX --> MEM["MEM<br/>load/store · MMIO<br/>CSRs · privilege check<br/>precise traps · ERET · HALT"]
   MEM --> WB["WB<br/>regfile write<br/>commit trace"]
   EX -. "EX/MEM fwd" .-> EX
   WB -. "MEM/WB fwd" .-> EX
@@ -113,9 +124,13 @@ flowchart LR
 
 * **Forwarding:** EX/MEM → EX and MEM/WB → EX (value *and* capability metadata); register file writes through to ID.
 * **Interlocks:** 1-cycle bubble for load-use and CSR-read-use; the front end stalls while MUL/DIV iterates.
-* **Branches:** JAL redirected in ID (1-cycle bubble); conditional branches statically predicted in ID
-  (backward taken / forward not taken), verified in EX (2-cycle penalty on mispredict); JALR resolved in EX.
-* **MUL/DIV:** radix-16 multiplier (32 iterations → full 256-bit product). **v2 divider:** radix-4 restoring
+* **Branches (v3):** a 16-entry direct-mapped **branch target buffer** with 2-bit saturating counters predicts taken
+  branches, `jal` and `jalr` (last target, e.g. returns) in IF with no bubble. On a BTB miss ID falls back to the
+  v2 static rule (JAL and backward branches redirect, 1 bubble). Every instruction carries its predicted next pc;
+  EX compares it with the real one and redirects on any difference (2-cycle penalty), so aliasing or stale targets
+  only cost time. `cjalr`/`cinvoke` always redirect from EX (they switch the fetch PCC). `+define+TX_NO_BTB` = v2.
+* **MUL/DIV:** **v3 multiplier:** 4 passes of a 128 × 32 partial-product array into a 256-bit accumulator
+  (6 cycles in EX, was 35 with v2's radix-16 shift-add; `+define+TX_MUL_BITS=4` rebuilds the v2 datapath). **v2 divider:** radix-4 restoring
   (4R+d compared against B, 2B, 3B in parallel), two radix-4 steps chained per cycle by default (4 quotient
   bits/cycle; `+define+TX_DIV_STEPS=1` = plain radix-4), with operand-normalised early termination — only
   `sig(|a|) − sig(|b|) + 1` quotient bits are computed. Latency ≈ `ceil(n/4) + 2` cycles (≤ ≈34, was ≤ 129 in v1);
@@ -128,6 +143,12 @@ flowchart LR
 * **Interrupts:** the timer condition is evaluated against the instruction in MEM — the oldest one, after all older
   instructions have updated `mtime` (retire count), `mtimecmp` and `status` — and the interrupt replaces it before it
   has any effect. Because `mtime` counts retirements, delivery lands exactly where the ISA model puts it.
+* **Privilege (v3):** `status.U/PU`; the privilege check runs in MEM against the architectural mode (mode only
+  changes at traps and `eret`, which flush younger instructions), turning a privileged instruction or an untagged
+  user access outside `[ubase, ubound)` into a cause-9 trap that replaces whatever EX found.
+* **Sentries / `cinvoke`:** share the `cjalr` path — EX redirects to rs1's cursor and installs rs1 *unsealed* as the
+  fetch PCC; the link (a sentry for sentry calls) or the unsealed data capability is the rd result. `clc` through a
+  read-only authority masks STORE/STORE_CAP off the loaded metadata in MEM.
 * **Traps** are taken in MEM, so they are precise; younger instructions are flushed; stores and MMIO side effects
   only happen for non-trapping instructions in MEM.
 * **Register file:** value and metadata arrays without reset (they map to memory macros) plus 64 "written" bits, so
@@ -143,60 +164,73 @@ RAM image, **identical shadow tag memory** (every tagged granule with its metada
 
 | Suite | Result | Notes |
 |---|---|---|
-| Tool self-tests (`tests/test_tools.py`) | **PASS** | 72 ISA constants in sync between Python and RTL (opcodes, counts, causes, ALU + CAP funcs, MMIO); 1054 random `li` constants exact (avg 3.35 instr); 11 737-instruction disasm→asm round trip |
-| Directed unit tests (`tests/unit_tests.py`) | **150 / 150** | v1's 133 + 17 new: divider width edges (3), tagged memory (`capmem_basic/perms/hazards`), PCC (`pcc_call/faults/eret_restore`), sealing (`seal_ops`, `seal_hazards`), timer interrupts (`irq_periodic/mixed/pcc/enable_pending/mmio_regs/nohandler`) |
-| Demo programs | **7 / 7** | fib(180), 30!..34! exact (+mulhu overflow), 24×128-bit sort, SIMD, capability faults, **caplist** (capability linked list in tagged memory), **timer** (deterministic ticks) — each also checked against independent Python results |
-| Random differential (`tests/random_tests.py`) | **2000 / 2000** (+ 2000/2000 on seeds 100001…, + 2000/2000 on the radix-4 build) | 1 687 421 instructions retired; per 2000 programs ≈ 21 100 timer interrupts, 63 000 traps of all 7 causes (incl. 1 170 cap-sealed, ≈ 1 850 PCC fetch faults), 2 670 tagged `clc` reloads, 14 560 successful `cjalr` calls/returns |
-| Mutation check (`tests/mutants.py`) | **20 / 20 caught** | v1's 8 + tag not cleared by data stores, `clc` ignoring LOAD_CAP, `csc` without STORE_CAP check, no PCC top check, `eret` not restoring the fetch PCC, sealed deref allowed, `cunseal` without otype check, radix-4 never picking digit 3, early-termination off-by-one, interrupt ignoring TIE, `mtime` counting traps, interrupted store not squashed (`results/mutants.txt`) |
+| Tool self-tests (`tests/test_tools.py`) | **PASS** | 75 ISA constants in sync between Python and RTL (opcodes incl. `ecall`, counts, causes 1–9, ALU + CAP funcs, MMIO); 1054 random `li` constants exact (avg 3.35 instr); 12 973-instruction disasm→asm round trip |
+| Directed unit tests (`tests/unit_tests.py`) | **164 / 164** | v2's 150 + 14 new: multiplier passes (`md_mul_passes0/1`, `haz_mul_abort`), sentries (`sentry_ops`, `sentry_hazards`), `cinvoke_ops`, `clc_attenuate`, privilege (`priv_basic`, `priv_mem`, `priv_irq`), BTB (`btb_patterns`, `btb_jalr_targets`, `btb_alias`, `btb_traps`) |
+| Demo programs | **8 / 8** | fib(180), 30!..34! exact (+mulhu overflow), 24×128-bit sort, SIMD, capability faults, caplist, timer, **kernel** (v3: two user tasks preempted round-robin, ecall putc/exit, console through a granted capability, task killed with cause 9 for an untagged MMIO store; output and preemption count checked against the trace) |
+| Random differential (`tests/random_tests.py`) | **2000 / 2000** (+ 2000/2000 on seeds 100001…) | 2 999 214 instructions retired (seeds 1…2000). New v3 streams: `mulw` (32-bit-chunk edge operands, chained products), `cinvoke` (sealed pairs, otype mismatch, unsealed/sentry/EXEC faults, return sentries), sentry `cjalr` calls, read-only `clc` authorities, `user` blocks (privileged ops, hybrid accesses around a random `[ubase, ubound)`, MMIO, `ecall` back), `bpat` (data-dependent inner branches), `call` (shared subroutines from many sites). Per 1000 programs (golden, `tests/coverage.py`): 18 700 interrupts; traps of all 9 causes (3 996 ecall, 9 093 privilege-violation, 1 313 cap-sealed …); 1 218 successful `cinvoke`s (2 697 faulting), 1 185 sentry calls, 5 335 `csealentry`, 121 attenuated `clc` results |
+| Mutation check (`tests/mutants.py`) | **33 / 33 caught** | v2's 20 (branch-verification mutant re-targeted at the new EX check) + 13 new: multiplier carry dropped / stale last pass, sentry link not sealed, `cinvoke` without otype match, no `clc` read-only attenuation, PCC keeps the sentry seal, `csrr` allowed in user mode, no lower user-window check, `eret` not restoring the mode, `csrw` able to set U, privilege-faulting store not squashed, BTB not-taken mispredict uncorrected, `jalr` target verified on low bits only (`results/mutants.txt`) |
 
 ### Performance (cycle-accurate RTL, CPI = cycles / retired instructions)
 
-| Workload | Cycles | Retired | CPI v2 (default, 4 b/cycle) | CPI v2 radix-4 (2 b/cycle) | CPI v1 (radix-2) |
+| Workload | Cycles v3 | Retired | **CPI v3** (BTB + 4-pass mul) | CPI v3 without BTB (`TX_NO_BTB`) | CPI v2 |
 |---|---:|---:|---:|---:|---:|
-| fib (7 Fibonacci numbers, decimal printing) | 9 837 | 6 476 | **1.52** | 1.74 | 2.27 |
-| fact (30!..34!, decimal printing) | 8 030 | 2 838 | **2.83** | 3.74 | 5.81 |
-| sort (24 × 128-bit keys) | 2 868 | 1 564 | 1.83 | 1.83 | 1.83 |
-| simd demo | 1 309 | 916 | 1.43 | 1.43 | 1.43 |
-| capfault demo | 1 558 | 1 073 | 1.45 | 1.45 | 1.47 |
-| caplist demo (tagged memory) | 2 181 | 1 537 | 1.42 | 1.42 | — |
-| timer demo (20 interrupts) | 7 330 | 5 824 | 1.26 | 1.26 | — |
-| all 150 unit tests | 25 111 | 15 028 | 1.67 | 1.84 | — |
-| 2000 random programs (v2 generator) | 3 065 584 | 1 687 421 | 1.82 | 1.88 | — |
+| fib (7 Fibonacci numbers, decimal printing) | 8 824 | 6 476 | **1.363** | 1.519 | 1.52 |
+| fact (30!..34!, decimal printing, 128-bit `mul`) | 6 489 | 2 838 | **2.286** | 2.472 | 2.83 |
+| sort (24 × 128-bit keys, LCG uses `mul`) | 1 985 | 1 564 | **1.269** | 1.389 | 1.83 |
+| simd demo | 1 148 | 916 | **1.253** | 1.429 | 1.43 |
+| capfault demo | 1 390 | 1 073 | **1.295** | 1.452 | 1.45 |
+| caplist demo (tagged memory) | 1 960 | 1 537 | **1.275** | 1.419 | 1.42 |
+| timer demo | 6 277 | 5 824 | **1.078** | 1.259 | 1.26 |
+| kernel demo (v3, two preempted user tasks) | 47 397 | 40 630 | **1.167** | 1.288 | — |
+| all 8 programs | 75 470 | 60 858 | **1.240** | 1.376 | — |
+| all 164 unit tests | 26 990 | 17 946 | **1.504** | 1.569 | — |
+| 2000 random programs (v3 generator) | 4 925 766 | 2 999 214 | **1.642** | 1.785 | — |
 
-fib/fact are dominated by software decimal printing (`divu`/`remu` by 10 of 128-bit numbers). With early
-termination a divide by 10 of an n-bit number now takes ≈ n/4 + 2 cycles instead of n + 1, and the paired `remu`
-still hits the result cache. fact keeps a higher CPI because of its 32-cycle iterative 128×128 multiplies.
+* **Multiplier:** fact 2.83 → 2.47 and sort 1.83 → 1.39 from the multiplier alone (columns 2 vs 3 only differ in the
+  front end); a 128×128 `mul`/`mulhu` pair now costs 6 cycles instead of 35. fact stays the highest-CPI workload because
+  decimal printing does `divu`/`remu` by 10 on 128-bit numbers (≈ n/4 + 2 cycles each).
+* **BTB:** −10 % cycles over the programs (CPI 1.376 → 1.240): loop back-edges and forward-taken branches are
+  predicted in IF with no bubble, and `ret` (`jalr`) is predicted from the last target, which is right for repeated
+  calls from one site. The kernel's context-switch copy loop and the timer demo's tight loop gain most.
 
 ### Synthesis (Yosys 0.70, generic gates)
 
-Full reports: `results/synth_stat_abc.txt` (hierarchical, ABC-mapped — `make synth`) and `results/synth_stat_techmap.txt` (techmap only).
+Full reports: `results/synth_stat_abc.txt` (hierarchical, ABC-mapped — `make synth`), `results/synth_stat_abc_nobtb.txt`
+(`-DTX_NO_BTB`), `results/synth_stat_abc_mul_radix16.txt` (`-DTX_MUL_BITS=4`, v2 multiplier), `results/synth_stat_techmap.txt` (v2, techmap only).
 The register file is kept as memory macros (`$mem_v2`, 64×128 b and 64×281 b, 2 read / 1 write), as a
-real implementation would use a register-file compiler. The shadow tag memory lives in the memory system
-(testbench), not in `tx_core`, just like RAM.
+real implementation would use a register-file compiler; the 16-entry BTB is mapped to flip-flops (`mem2reg`).
 
-| Block (hierarchical, after ABC) | v2 cells | v1 cells |
+| Block (hierarchical, after ABC) | v3 cells | v2 cells |
 |---|---:|---:|
-| **tx_core total** | **113 509** | 93 056 |
-| ├ tx_alu (128-bit ALU incl. barrel shifters, clz/ctz/popcnt) | 8 124 | 8 124 |
-| ├ tx_muldiv (mul + radix-4 ×2/cycle early-terminating divider + result cache) | 17 235 | 11 539 |
-| ├ tx_simd (8/16/32/64-bit lane arrays incl. 28 lane multipliers) | 48 052 | 48 052 |
-| └ core glue (pipeline, forwarding, capability/PCC/seal checks, CSRs, timer, decode) | 40 098 | 25 341 |
-| of which flip-flops | 7 042 | 4 919 |
+| **tx_core total** | **145 247** | 113 509 |
+| ├ tx_alu (128-bit ALU) | 8 740 ¹ | 8 124 |
+| ├ tx_muldiv (4-pass 128×32 multiplier + radix-4 ×2 divider + result cache) | 39 267 | 17 235 |
+| ├ tx_simd (8/16/32/64-bit lane arrays) | 48 052 | 48 052 |
+| └ core glue (pipeline, BTB, forwarding, capability/PCC/seal/sentry checks, privilege, CSRs, timer, decode) | 49 188 | 40 098 |
+| of which flip-flops | 8 188 | 7 042 |
 | of which register-file memory macros (`$mem_v2`) | 3 | 3 |
-| combinational gates (AND/NAND/OR/NOR/XOR/XNOR/MUX/NOT…) | 106 464 | 88 134 |
+| combinational gates | 137 056 | 106 464 |
 
-Plain radix-4 build (`-DTX_DIV_STEPS=1`, `results/synth_stat_abc_div_radix4.txt`): tx_muldiv 14 248, total 110 522.
-Techmap-only (no ABC) count: 129 483 cells (v1: 107 346). ABC synthesis runtime ≈ 130 s (WebAssembly Yosys).
-The core glue grew mostly from the wider capability side-band (261 → 281 bits through the pipeline), the PCC/EPCC
-registers, the sealing checks and the 128-bit `mtime`/`mtimecmp` comparator. The SIMD unit still dominates area
-because every lane width has its own datapath; sharing one segmented adder/multiplier array is the obvious next optimisation.
+¹ unchanged RTL; ABC's result for the ALU varies by ≈ ±600 cells between runs (8 124 in the `TX_NO_BTB` run).
 
-## Known gaps (v2)
+* **Multiplier cell delta: +21 877 cells** (tx_muldiv 39 267 vs 17 390 for the radix-16 build of the same RTL,
+  `TX_MUL_BITS=4`; core totals 145 247 vs 123 370). The extra area is the 128×32 partial-product array.
+* **BTB:** ≈ +3 000 cells and +500 flip-flops (core 145 247 vs 141 646 with `TX_NO_BTB`, ALU noise removed).
+* The rest of the glue growth (≈ +6 000) is the privilege logic (`ubase`/`ubound` CSRs and window comparators,
+  status bits, privileged-instruction detection in MEM), the per-instruction predicted-next-pc registers, the
+  sentry/`cinvoke` checks and the 5-bit CAP function decode.
 
-* Sealing is minimal: no sealed entry points (sentries / `CInvoke`), no LOAD_MUTABLE/GLOBAL-style permissions;
-  capability permissions are not transitively reduced on `clc`.
+## Known gaps (v3)
+
+* No GLOBAL/LOCAL or separate LOAD_MUTABLE / PERMIT_CINVOKE permission bits (STORE doubles as the LM bit for `clc`
+  attenuation; `cinvoke` authority is the otype match + EXEC split); EPCC is write-only, so a kernel tracks task PCCs.
+* Two privilege levels only, one global user window (`ubase/ubound`, the kernel swaps it per task); user mode cannot
+  read any CSR (not even `mtime`, unless given a capability to it).
 * Capabilities keep full-precision bounds, so each 16-byte granule needs a 281-bit shadow entry (no CHERI-style
   bounds compression); `mtime` is a retired-instruction counter, not wall-clock time; single interrupt source.
-* Single privilege level; no MMU (flat 128-bit space, 256 KiB physical RAM), no FPU/atomics, no self-modifying-code fence.
-* Multiplier is still iterative (32 cycles); synthesis is technology-independent (no timing/area on a real cell
+* No MMU (flat 128-bit space, 256 KiB physical RAM), no FPU/atomics, no self-modifying-code fence (the BTB would
+  need flushing too).
+* The 4-pass multiplier costs ≈ 21.9 k generic cells over v2's radix-16 one (a Booth-recoded / Wallace array or
+  sharing the SIMD lane multipliers would cut that); the BTB is tiny (16 entries, no return-address stack).
+* Synthesis is technology-independent (no timing/area on a real cell
   library; the chained radix-4 divider step doubles the divider's critical path); no FPGA bring-up yet.
