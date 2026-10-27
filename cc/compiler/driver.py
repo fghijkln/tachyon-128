@@ -99,7 +99,10 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
             code = fg.code
             if optimize:
                 opt.PURECAP = purecap
-                code = opt.hoist_constants(opt.optimize(opt.local_cse(opt.optimize(code))))
+                code = opt.local_cse(opt.optimize(code))
+                if opt.enabled("rle"):
+                    code = opt.redundant_loads(code)
+                code = opt.hoist_constants(opt.optimize(code))
                 if opt.enabled("licm"):
                     code = opt.optimize(opt.hoist_invariants(code))
                 code = opt.fuse_word_ops(opt.schedule_loads(code))

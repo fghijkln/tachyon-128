@@ -612,7 +612,9 @@ class FuncGen:
             return self.addr_reg(lv)
         r = self.vreg()
         sz = 16 if ty.kind == "ptr" else ty.size
-        self.emit("ld", d=r, a=lv.reg, imm=lv.off, sz=sz, sign=not (ty.unsigned or ty.kind == "ptr"))
+        i = self.emit("ld", d=r, a=lv.reg, imm=lv.off, sz=sz, sign=not (ty.unsigned or ty.kind == "ptr"))
+        if ty.volatile:
+            i.extra = "vol"           # never merged with another load (opt.redundant_loads)
         return r
 
     def store(self, lv, v, ty):

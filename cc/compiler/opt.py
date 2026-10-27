@@ -685,6 +685,46 @@ def hoist_invariants(code):
     return code
 
 
+RLE_KEEP = {"bin", "ext", "li", "la", "mov", "faddr", "bcc", "ld"}
+
+
+def redundant_loads(code):
+    """v6 redundant-load elimination over extended basic blocks (a conditional branch's
+    fall-through continues the block; labels, jumps and returns end it): a non-volatile load
+    of the same base/offset/size/signedness as an earlier one becomes a mov of that value.
+    Stores, calls and any other op that may touch memory forget every load; redefining a
+    base or a value register forgets the loads that mention it."""
+    avail = {}
+
+    def kill(r):
+        for k in [k for k, v in avail.items() if k[0] == r or v == r]:
+            del avail[k]
+
+    for idx, i in enumerate(code):
+        if i.op == "label":
+            avail = {}
+            continue
+        if i.op not in RLE_KEEP:
+            avail = {}
+        if i.op == "ld" and i.extra != "vol" and i.a is not None and i.d is not None:
+            key = (i.a, i.imm, i.sz, i.sign)
+            v = avail.get(key)
+            if v is not None and v != i.d:
+                code[idx] = Ins("mov", d=i.d, a=v)
+                kill(i.d)
+                continue
+            kill(i.d)
+            if i.d != i.a:
+                avail[key] = i.d
+            continue
+        for d in i.defs():
+            if d is not None:
+                kill(d)
+        if i.op in ("br", "ret", "jt"):
+            avail = {}
+    return code
+
+
 CSE_OPS = {"bin", "ext", "li", "la", "faddr"}
 
 
