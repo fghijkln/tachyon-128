@@ -197,7 +197,7 @@ the trap handler prints the cause and faulting address, exit code 128 + cause):
 | 026_uaf_invalid_free | `free` of an interior pointer | `free(): invalid pointer`, abort |
 | 027_uaf_heap_churn | lists/tree/realloc churn across many sweeps; live pointers keep their tags | no trap |
 
-Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** — all 86 normal C tests pass
+Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** (stage 2; v6 suite with the sentry and use-after-free tests: 111/111 at `-O` and `-O0`) — all 86 normal C tests pass
 unmodified in purecap mode (none excluded) plus the 7 fault tests; every purecap test also matches the
 RTL model commit-by-commit (`--rtl`). The runner additionally audits the golden model and fails a test
 on any RAM access through an untagged base (none occur). Purecap fuzzing: 350/350 at `-O`
@@ -260,10 +260,18 @@ used by the test scripts). Exact rules: [`ABI.md`](ABI.md) §8.1.
   max(16 KiB, heap/4) a revocation sweep (`cloadtags` over image, heap and stack; `clc`/`crevtag`/`csc` on
   each tagged granule; `crevtag` on the callee-saved registers) strips every capability into quarantined
   memory before it is reused, so a stale pointer can never alias a new object (CHERIvoke/Cornucopia style).
-  Exact rules: [`ABI.md`](ABI.md) §8.2. Tests: `purecap/020`–`027` below. Cost (golden retired
-  instructions, `-O`, `cc/bench/malloc_churn.c`, ~2,500 malloc/free pairs and nothing else):
-  see the overhead table in §8.2 results below; the existing benchmarks do not call `malloc` and are
-  unaffected.
+  Exact rules: [`ABI.md`](ABI.md) §8.2. Tests: `purecap/020`–`027` below.
+  Cost, `-mpurecap -O`, RTL cycles (golden retired instructions), revocation on vs `-fno-revoke`:
+
+  | benchmark | `-fno-revoke` | revocation | overhead |
+  |---|---:|---:|---:|
+  | malloc_churn (2,012 malloc/free pairs, nothing else) | 648,263 (575,965) | 907,682 (802,164) | +40.0% (+39.3%), image +992 B |
+  | fib, sieve, qsort, dhrystone, coremark_lite, int128 | — | — | 0 (identical cycles; they never call `free`) |
+
+  `malloc_churn` is a worst case: allocator calls are all it does, so ~112 instructions per `free` (probe,
+  bitmap marking, quarantine bookkeeping and the amortised sweeps) show up in full. The hardware check
+  itself is free: it runs in parallel with the bounds check in EX, so code that does not free memory pays
+  nothing.
 
 ## Limitations
 
