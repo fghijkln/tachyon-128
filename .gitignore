@@ -4,3 +4,10 @@ build/
 *.lst
 __pycache__/
 obj_dir/
+*.class
+*.pkl
+*.o
+*.vcd
+*.fst
+.cache/
+.git/merge.lock
