@@ -17,7 +17,7 @@ from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import ROOT, assemble_path, assemble_src, run_diff  # noqa: E402
 
-PROGRAMS = ["fib", "fact", "sort", "simd", "capfault", "caplist", "timer", "kernel"]
+PROGRAMS = ["fib", "fact", "sort", "simd", "capfault", "caplist", "timer", "kernel", "recurse"]
 WORK = os.environ.get("TX_WORK", os.path.join(ROOT, "build", "work"))
 
 
@@ -79,6 +79,9 @@ def expect_program(name):
             if f"sum(i^2, 1..1000) = {sum(i * i for i in range(1, 1001))}\n" not in out \
                     or f"timer ticks       = {ticks}\n" not in out or ticks < 10 or out.splitlines()[0] != "." * ticks:
                 return "timer behaviour wrong"
+        if name == "recurse":
+            if "rfib(18)    = 2584\n" not in out or "ack(2, 3)   = 9\n" not in out or "tree sum    = 2016\n" not in out:
+                return "recurse results wrong"
         if name == "kernel":
             irqs = sum(1 for l in m.trace if l.startswith("I 1 "))
             body = out.split("\n[kernel] task 1 killed")[0].split("\n", 1)[1]
