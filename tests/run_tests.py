@@ -140,6 +140,12 @@ def main():
     if what in ("unit", "all"):
         from unit_tests import tests
         res = run([("src", n, s, 0) for n, s in tests().items()], "unit")
+        from unit_tests import PERF_MAX
+        for r in res:
+            if r.ok and r.name in PERF_MAX and r.cycles > PERF_MAX[r.name]:
+                print(f"FAIL {r.name}: performance bound exceeded: {r.cycles} cycles > {PERF_MAX[r.name]}")
+                r.ok = False
+        print(f"[perf] {sum(1 for r in res if r.name in PERF_MAX and r.ok)}/{len(PERF_MAX)} performance bounds met")
         save("unit", res)
         rc |= any(not r.ok for r in res)
     if what in ("programs", "all"):

@@ -44,6 +44,17 @@ def rtype_test(mn, unary, seed, n=14):
     return PRE + "\n".join(body) + "\n" + POST
 
 
+# Performance expectations (RTL cycles, checked by run_tests.py after the differential check passes).
+# Branch/return prediction is invisible to the ISA, so these bounds are what lets the suite (and the
+# mutation check) notice a predictor that silently stopped working.
+PERF_MAX = {
+    "ras_nested": 412,          # v4 RAS: 403 cycles (430 without RAS)
+    "ras_recursive": 6700,      # 6611 (7314 without RAS)
+    "ras_sites": 176,           # 169 (220 without RAS)
+    "ras_traps": 2740,          # 2713 (2978 without RAS)
+}
+
+
 def tests():
     T = {}
     # ---------------- integer ALU / MULDIV / SIMD / CAP R-type
@@ -447,6 +458,124 @@ handler: addi r53, r53, 1
         addi r51, r51, 4
         csrw epc, r51
         eret
+"""
+    # v4: return address stack
+    nest = []
+    for k in range(12):                     # 12-deep chain: overflows the 8-entry RAS
+        nest.append(f"F{k}:     addi r{20 + k}, ra, 0\n        addi r40, r40, {k + 1}")
+        if k < 11:
+            nest.append(f"        call F{k + 1}")
+        nest.append(f"        addi ra, r{20 + k}, 0\n        ret")
+    T["ras_nested"] = PRE + """
+        li r5, 3
+again:  call F0
+        call F6                 # enter mid-chain
+        call F10
+        addi r5, r5, -1
+        bnez r5, again
+        halt zero
+""" + "\n".join(nest) + "\n"
+    T["ras_recursive"] = PRE + """
+        li sp, 0x8000
+        li a0, 12
+        call rfib               # recursive fib(12) with ra spilled to a memory stack
+        mv r40, a0
+        li a0, 9
+        call rfib
+        mv r41, a0
+        halt zero
+rfib:   li t0, 2
+        bltu a0, t0, rbase
+        addi sp, sp, -48
+        sq ra, 0(sp)
+        sq a0, 16(sp)
+        addi a0, a0, -1
+        call rfib
+        sq a0, 32(sp)
+        lq a0, 16(sp)
+        addi a0, a0, -2
+        call rfib
+        lq t1, 32(sp)
+        add a0, a0, t1
+        lq ra, 0(sp)
+        addi sp, sp, 48
+rbase:  ret
+"""
+    T["ras_sites"] = PRE + """
+        li r5, 6
+loop:   call inc
+        call inc
+        addi r6, r6, 1
+        call dbl
+        call inc
+        call empty              # function that is only a return
+        call empty
+        addi r5, r5, -1
+        bnez r5, loop
+        la ra, co1
+        jalr ra, 0(ra)          # coroutine-style jalr ra, ra: a push, not a pop
+back:   la t0, tail
+        jalr zero, 0(t0)        # indirect jump not through ra: neither push nor pop
+        halt zero
+co1:    addi r8, r8, 1
+        jalr r7, 0(ra)          # return-like jalr writing another register: pops (-> back), writes r7
+tail:   call inc
+        halt zero
+inc:    addi r10, r10, 1
+        ret
+dbl:    add r10, r10, r10
+        ret
+empty:  ret
+"""
+    T["ras_traps"] = PRE + """
+        la r4, handler
+        csrw tvec, r4
+        li r52, -0x10000
+        li r51, 40
+        sq r51, 0x40(r52)       # timer at mtime = 40
+        li r51, 5
+        csrw status, r51
+        li r9, 25
+loop:   call f1
+        ld r7, 3(r0)            # misaligned trap right behind a return
+        call f2                 # call in EX while an older instruction traps in MEM: push undone
+        addi r9, r9, -1
+        bnez r9, loop
+        li r9, 20
+loop2:  call outer              # the return popped speculatively behind a trapping load must be undone,
+        addi r9, r9, -1         # or outer's return mispredicts
+        bnez r9, loop2
+        halt zero
+outer:  addi r14, ra, 0
+        call inner
+        addi ra, r14, 0
+        ret
+inner:  ld r7, 3(r0)
+        ret
+f1:     addi r11, ra, 0
+        call f2
+        ecall                   # trap inside a call chain; the handler itself calls a function
+        addi ra, r11, 0
+        ret
+f2:     addi r12, r12, 1
+        ret
+handler: addi r20, ra, 0
+        csrr r62, cause
+        bltz r62, hirq
+        call hsub
+        csrr r51, epc
+        addi r51, r51, 4
+        csrw epc, r51
+        addi ra, r20, 0
+        eret
+hirq:   lq r51, 0x30(r52)
+        addi r51, r51, 37
+        sq r51, 0x40(r52)
+        call hsub
+        addi ra, r20, 0
+        eret
+hsub:   addi r13, r13, 1
+        ret
 """
     T["haz_branch_dense"] = PRE + """
         li r4, 20

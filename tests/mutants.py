@@ -60,6 +60,13 @@ MUTANTS = [
     ("shared_mul_16b_mode_wrong", "tx_core.sv", "ex_fn[1:0] == 2'd1 ? 2'd1 : 2'd0", "ex_fn[1:0] == 2'd1 ? 2'd2 : 2'd0"),
     ("shared_mul_not_claimed", "tx_core.sv", ".x(sh_busy ? sh_x : a)", ".x(a)"),
     ("mul_pass_product_misaligned", "tx_muldiv.sv", "{sh_p[255:192], sh_p[127:64], 32'd0}", "{sh_p[223:192], sh_p[127:64], 64'd0}"),
+    ("ras_return_not_verified", "tx_core.sv", "ex_k[K_JALR] ? jalr_tgt : ex_pc4;",
+     "(ex_k[K_JALR] & idex_ret) ? idex_pnpc : ex_k[K_JALR] ? jalr_tgt : ex_pc4;"),
+    ("ras_no_restore_on_trap", "tx_core.sv", "for (int i = 0; i < RAS_N; i++) ras_s[i] <= ras_c[i];\n        ras_sp <= ras_cp;", ""),
+    ("ras_no_if_bypass", "tx_core.sv", "wire  [15:0] if_ras_top = (ifid_valid & id_call) ? id_link_w :",
+     "wire  [15:0] if_ras_top = 1'b0 ? id_link_w :"),
+    ("ras_pop_missing", "tx_core.sv", "else ras_sp <= ras_t1;", "else ;"),
+    ("ras_btb_ret_bit_ignored", "tx_core.sv", "(btb_ret[if_bi] & ras_on) ?", "1'b0 ?"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

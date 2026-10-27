@@ -26,7 +26,7 @@
 - **异常**：非法指令、能力错误（tag/边界/权限/密封）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
 - **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
-- **v4 微架构**：乘法器面积缩小——标量乘法的 128×32 部分积阵列与 SIMD `vmul` 共享一块“可拆分”的 4×(32×32) radix-4 Booth 乘法阵列（仍为 6 周期）。
+- **v4 微架构**：8 项返回地址栈（RAS，推测更新 + 提交副本在陷入时恢复）预测 `call`/`ret`；乘法器面积缩小——标量乘法的 128×32 部分积阵列与 SIMD `vmul` 共享一块“可拆分”的 4×(32×32) radix-4 Booth 乘法阵列（仍为 6 周期）。
 - **实现**：Python 汇编器/反汇编器/黄金参考模拟器；SystemVerilog 五级流水线（前递、load-use 互锁、v3 BTB + 2 位计数器分支预测、v3 4 遍 6 周期乘法器、radix-4 除法器，带结果缓存），用 Verilator 与黄金模型逐条提交轨迹对比验证，用 Yosys 综合统计单元数。
 
 ---
@@ -564,6 +564,19 @@ These describe `rtl/` timing only; software must not depend on them.
   so stale targets, aliasing outside RAM, or a pattern change can only cost cycles. `cjalr`/`cinvoke` are never
   predicted (they also switch the fetch PCC) and always redirect from EX. `+define+TX_NO_BTB` restores the static
   front end. Prediction is invisible to software: the golden model has no notion of it.
+* **Return address stack (v4):** 8 entries of 16-bit word targets. A *call* is `jal`/`jalr` with `rd = ra` (push
+  `pc + 4`); a *return* is `jalr` with `rs1 = ra` and `rd ≠ ra` (pop) — the `call`/`ret` pseudo-ops produce exactly
+  these; `jalr ra, 0(ra)` is a call, `cjalr`/`cinvoke` are neither. BTB entries carry a *return* bit: a BTB hit on a
+  return takes its target from the RAS top instead of the stored last target, so a function called from many sites
+  is predicted correctly. A return the BTB has not seen yet is predicted from the RAS in ID (1 bubble). The
+  speculative stack is updated when a call/return advances from ID to EX (IF sees the update of the instruction in ID
+  through a bypass, so an empty function `f: ret` is predicted too); a second, committed copy is updated in MEM and
+  copied back on every MEM redirect (trap, interrupt, `eret`, `halt`) — exactly the events that flush younger
+  instructions whose speculative pushes/pops must be undone (a branch misprediction in EX never has wrong-path
+  calls/returns past ID). Overflow wraps (the oldest entry is overwritten), underflow mispredicts; every prediction is
+  still verified in EX, so the RAS can only cost cycles. `+define+TX_NO_RAS` removes it. Like the BTB it is invisible
+  to software and absent from the golden model; `tests/unit_tests.py` therefore carries cycle bounds (`PERF_MAX`) for
+  the RAS tests so that a predictor that silently stops working fails the suite.
 * **Multiplier (v3):** radix-2^32 multi-pass multiplier. Each cycle one 128 × 32 partial-product array (reduced
   carry-save by synthesis) is added to the upper half of a 256-bit accumulator, which then shifts right by 32;
   four passes produce the full 256-bit product and the last pass writes the result cache directly.

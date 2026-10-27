@@ -105,6 +105,7 @@ module tx_core #(
                 exmem_csrw, exmem_eret, exmem_halt, exmem_mmio, exmem_clc, exmem_csc, exmem_ldcap, exmem_ldro;
   logic [MW-1:0] exmem_smeta, exmem_tmeta;
   logic         exmem_cjalr, exmem_setepcc;
+  logic         idex_call, idex_ret, exmem_call, exmem_ret;   // RAS classification (v4)
   logic [127:0] exmem_pc, exmem_val, exmem_ea, exmem_sdata, exmem_tval0;
   logic [128:0] exmem_eaend;
   logic         exmem_priv, exmem_hyb;     // privileged instruction / untagged-base memory access
@@ -177,8 +178,31 @@ module tx_core #(
 `else
   wire           if_bhit = btb_v[if_bi] & (btb_tag[if_bi] == pc_q[17:6]);
 `endif
+  (* mem2reg *) logic          btb_ret [0:15];      // v4: entry is a return (target comes from the RAS)
   wire           if_bpred = if_bhit & btb_ctr[if_bi][1];
-  wire [127:0]   if_pnpc  = if_bpred ? {pc_q[127:18], btb_tgt[if_bi], 2'b00} : pc_q + 128'd4;
+
+  // ---- return address stack (v4): 8 entries of 16-bit word targets (pc[17:2]), circular (overflow
+  //      overwrites the oldest entry, underflow just mispredicts). Speculative copy updated in ID as calls
+  //      (jal/jalr with rd = ra: push) and returns (jalr with rs1 = ra, rd != ra: pop) advance to EX; committed copy
+  //      updated in MEM and copied back on every MEM redirect (trap, interrupt, eret, halt), which flushes
+  //      exactly the younger instructions whose speculative updates must be undone.
+  //      +define+TX_NO_RAS removes it.
+  localparam int RAS_N = 8;
+  (* mem2reg *) logic [15:0] ras_s [0:RAS_N-1];      // speculative
+  (* mem2reg *) logic [15:0] ras_c [0:RAS_N-1];      // committed
+  logic [2:0]  ras_sp, ras_cp;                       // index of the next free slot
+  wire  [2:0]  ras_t1 = ras_sp - 3'd1, ras_t2 = ras_sp - 3'd2;
+  logic        id_call, id_ret, id_ras_go;
+  logic [15:0] id_link_w;
+`ifdef TX_NO_RAS
+  wire         ras_on = 1'b0;
+`else
+  wire         ras_on = 1'b1;
+`endif
+  // top of stack as seen by the instruction in IF (bypassing the update of the call/return in ID)
+  wire  [15:0] if_ras_top = (ifid_valid & id_call) ? id_link_w : (ifid_valid & id_ret) ? ras_s[ras_t2] : ras_s[ras_t1];
+  wire [127:0]   if_pnpc  = if_bpred ? {pc_q[127:18], (btb_ret[if_bi] & ras_on) ? if_ras_top : btb_tgt[if_bi], 2'b00}
+                                     : pc_q + 128'd4;
 
   // ======================================================================== ID
   wire [NK-1:0] id_k   = decode(ifid_inst);
@@ -210,7 +234,14 @@ module tx_core #(
   wire [127:0] id_imm20 = {{108{ifid_inst[31]}}, ifid_inst[31:12]};
   // static fallback when the BTB had no entry: backward branch -> taken; JAL always (unless the BTB already did)
   wire         id_static = id_k[K_BR] & ifid_inst[31] & ~ifid_bhit;
-  wire [127:0] id_target = id_k[K_JAL] ? ifid_pc + (id_imm20 << 2) : ifid_pc + (id_imm14 << 2);
+  // RAS: call = jal/jalr writing ra; return = jalr through ra not writing ra
+  assign id_call   = ~ifid_fault & (id_k[K_JAL] | id_k[K_JALR]) & (id_fa == 6'd1);
+  assign id_ret    = ~ifid_fault & id_k[K_JALR] & (id_rs1 == 6'd1) & (id_fa != 6'd1);
+  assign id_link_w = ifid_pc[17:2] + 16'd1;
+  // a return the BTB did not know yet is predicted from the RAS in ID (1 bubble, like the static rule)
+  wire         id_rasp   = id_ret & ~ifid_bhit & ras_on;
+  wire [127:0] id_target = id_k[K_JAL] ? ifid_pc + (id_imm20 << 2) :
+                           id_rasp ? {ifid_pc[127:18], ras_s[ras_t1], 2'b00} : ifid_pc + (id_imm14 << 2);
 
   // load-use / csrr-use interlock
   wire ex_is_late = idex_valid & idex_we & ((idex_inst[5:0] >= OP_LB && idex_inst[5:0] <= OP_CLC) ||
@@ -546,7 +577,9 @@ module tx_core #(
 
   // ======================================================================== control
   wire stall = stall_lu | stall_md;
-  wire id_redirect = ifid_valid & ~ifid_fault & ((id_k[K_JAL] & ~ifid_bpred) | id_static);
+  wire id_redirect = ifid_valid & ~ifid_fault & ((id_k[K_JAL] & ~ifid_bpred) | id_static | id_rasp);
+  // the call/return in ID updates the speculative RAS when it advances to EX
+  assign id_ras_go = ifid_valid & ~stall & ~ex_redirect & ~mem_redirect & (id_call | id_ret) & ras_on;
   wire [127:0] id_pnpc = id_redirect ? id_target : ifid_pnpc;
 
   always_ff @(posedge clk) begin
@@ -595,6 +628,7 @@ module tx_core #(
         idex_rs1 <= id_rs1; idex_rs2 <= id_rs2; idex_rd <= id_fa; idex_we <= id_we;
         idex_v1 <= id_v1; idex_v2 <= id_v2; idex_m1 <= id_m1; idex_m2 <= id_m2;
         idex_pnpc <= id_pnpc;
+        idex_call <= id_call; idex_ret <= id_ret;
       end
 
       // ---------------- EX/MEM
@@ -616,6 +650,8 @@ module tx_core #(
         exmem_tmeta <= ma_unsealed;              // csetepcc: rs1 is unsealed anyway
         exmem_cjalr <= ex_cjalr & ~ex_trap;
         exmem_setepcc <= ex_setepcc & ~ex_trap;
+        exmem_call  <= idex_call & ~idex_fault;
+        exmem_ret   <= idex_ret & ~idex_fault;
         exmem_clc   <= is_clc;
         exmem_csc   <= is_csc;
         exmem_ldcap <= ~a_tag | a_perm[3];               // LOAD_CAP (or unchecked base)
@@ -701,12 +737,58 @@ module tx_core #(
           btb_v[ex_bi] <= 1'b1; btb_tag[ex_bi] <= idex_pc[17:6];
           btb_tgt[ex_bi] <= br_target[17:2]; btb_ctr[ex_bi] <= 2'd2;
         end
-      end else begin                     // JAL / JALR: last target, always taken
+      end else begin                     // JAL / JALR: last target, always taken; returns use the RAS
         btb_v[ex_bi] <= 1'b1; btb_tag[ex_bi] <= idex_pc[17:6];
         btb_tgt[ex_bi] <= ex_anpc[17:2]; btb_ctr[ex_bi] <= 2'd3;
       end
+      btb_ret[ex_bi] <= ~ex_k[K_BR] & idex_ret;
     end
   end
+
+  // ---- RAS update: speculative in ID, committed in MEM, restore on MEM redirect
+  wire mem_ras = mem_v & ~exmem_trap & (exmem_call | exmem_ret) & ras_on;
+  wire [15:0] mem_link_w = exmem_pc[17:2] + 16'd1;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      ras_sp <= '0; ras_cp <= '0;
+      for (int i = 0; i < RAS_N; i++) begin ras_s[i] <= '0; ras_c[i] <= '0; end
+    end else if (!halted_q) begin
+      // committed copy (instruction in MEM retires)
+      if (mem_ras) begin
+        if (exmem_call) begin ras_c[ras_cp] <= mem_link_w; ras_cp <= ras_cp + 3'd1; end
+        else ras_cp <= ras_cp - 3'd1;
+      end
+      // speculative copy; a MEM redirect never coincides with a retiring call/return (traps do not
+      // retire, eret/halt are neither), so restoring the committed state is exact
+      if (mem_redirect) begin
+        for (int i = 0; i < RAS_N; i++) ras_s[i] <= ras_c[i];
+        ras_sp <= ras_cp;
+      end else if (id_ras_go) begin
+        if (id_call) begin ras_s[ras_sp] <= id_link_w; ras_sp <= ras_sp + 3'd1; end
+        else ras_sp <= ras_t1;
+      end
+    end
+  end
+
+`ifdef TX_PERF
+  // optional cycle-loss counters (simulation only): +define+TX_PERF, printed to stderr at the end
+  longint unsigned pf_br, pf_jal, pf_jalr, pf_ret, pf_cj, pf_idr, pf_lu, pf_md;
+  initial begin pf_br = 0; pf_jal = 0; pf_jalr = 0; pf_ret = 0; pf_cj = 0; pf_idr = 0; pf_lu = 0; pf_md = 0; end
+  always_ff @(posedge clk) if (!rst && !halted_q) begin
+    if (ex_redirect && !mem_redirect) begin
+      if (ex_cjalr) pf_cj <= pf_cj + 1;
+      else if (ex_k[K_BR]) pf_br <= pf_br + 1;
+      else if (ex_k[K_JAL]) pf_jal <= pf_jal + 1;
+      else if (ex_k[K_JALR] && idex_ret) pf_ret <= pf_ret + 1;
+      else pf_jalr <= pf_jalr + 1;
+    end
+    if (id_redirect && !stall && !ex_redirect && !mem_redirect) pf_idr <= pf_idr + 1;
+    if (stall_lu && !stall_md) pf_lu <= pf_lu + 1;
+    if (stall_md) pf_md <= pf_md + 1;
+  end
+  final $fwrite(32'h8000_0002, "perf: EX-redirects br=%0d jal=%0d ret=%0d jalr=%0d cjalr/cinvoke=%0d  ID-redirects=%0d  load-use=%0d muldiv-stall=%0d\n",
+                pf_br, pf_jal, pf_ret, pf_jalr, pf_cj, pf_idr, pf_lu, pf_md);
+`endif
 
   assign halted    = halted_q;
   assign exit_code = exit_q;
