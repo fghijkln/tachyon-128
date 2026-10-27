@@ -263,6 +263,11 @@ def optimize(code):
                 if i.b is not None and i.b in rep:
                     i.b = R(i.b)
             changed = True
+        if enabled("copyprop"):
+            if local_copy_prop(code):
+                changed = True
+            code, d = live_dce(code)
+            changed = changed or d
         # retarget: t = <op>; mov v, t  (t used once, defined right before) -> v = <op>
         uc = use_counts(code)
         dc = def_counts(code)
@@ -339,6 +344,62 @@ def fold_bases(code):
                     i.a is not None and i.a >= VREG0 and i.a != d and not PURECAP:
                 eq[d] = (i.a, sx(i.imm))
     return did
+
+
+def local_copy_prop(code):
+    """v6 block-local copy propagation for multiply-defined vregs (the global pass only handles
+    single-definition copies): after d = mov s, uses of d read s until either is redefined."""
+    cp = {}
+    did = False
+    dc = def_counts(code)
+    uc = use_counts(code)
+    for i in code:
+        if i.op == "label":
+            cp = {}
+            continue
+        if cp:
+            if i.a is not None and i.a in cp and i.op != "label":
+                i.a = cp[i.a]
+                did = True
+            if i.b is not None and i.b in cp and i.op in ("bin", "bcc", "st"):
+                i.b = cp[i.b]
+                did = True
+        for d in i.defs():
+            if d is None:
+                continue
+            if cp:
+                cp = {k: v for k, v in cp.items() if k != d and v != d}
+            if i.op == "mov" and d >= VREG0 and i.a is not None and i.a >= VREG0 and i.a != d and \
+                    not (dc.get(i.a) == 1 and uc.get(i.a) == 1):
+                cp[d] = i.a     # (t = op; ...; d = mov t with t used once is left to retargeting)
+    return did
+
+
+def live_dce(code):
+    """v6 liveness-based dead-code elimination: a pure definition (no loads) whose vreg is not
+    live afterwards is removed even if the vreg is used elsewhere (other live ranges)."""
+    from .backend import build_blocks, liveness
+    blocks = build_blocks(code)
+    liveness(code, blocks)
+    dead = set()
+    for b in blocks:
+        live = b.live_out
+        for k in range(b.end, b.start - 1, -1):
+            i = code[k]
+            ds = i.defs()
+            if i.op in ("li", "la", "mov", "bin", "ext", "faddr") and ds and ds[0] is not None and \
+                    ds[0] >= VREG0 and not (live >> (ds[0] - VREG0)) & 1:
+                dead.add(k)
+                continue
+            for d in ds:
+                if d is not None and d >= VREG0:
+                    live &= ~(1 << (d - VREG0))
+            for u in i.uses():
+                if u is not None and u >= VREG0:
+                    live |= 1 << (u - VREG0)
+    if not dead:
+        return code, False
+    return [i for k, i in enumerate(code) if k not in dead], True
 
 
 DUP_MAX = 4       # instructions (besides the ret) of a return block that may be copied
