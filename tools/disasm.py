@@ -55,6 +55,8 @@ def decode(w):
         return ("csrw", "csrw") if f["uimm14"] < NUM_CSRS else None
     if op == OP_ERET:
         return ("eret", "eret")
+    if op == OP_ECALL:
+        return ("ecall", "ecall")
     return None
 
 
@@ -94,7 +96,7 @@ def disasm(w, pc=0):
         return f"csrr {rd}, {_INV_CSR[f['uimm14']]}"
     if kind == "csrw":
         return f"csrw {_INV_CSR[f['uimm14']]}, {rs1}"
-    return "eret"
+    return mn
 
 
 def main():

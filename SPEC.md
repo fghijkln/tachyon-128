@@ -22,6 +22,7 @@
      **v3 `clc` 权限衰减**：通过不带 STORE 权限的能力 `clc` 读出的（未密封）能力自动去掉 STORE/STORE_CAP——只读视图传递为深度只读。
   2. **寄存器内 SIMD 通道**：一个 128 位寄存器可视为 16×8 / 8×16 / 4×32 / 2×64 位通道，支持加减、饱和加减、min/max、比较掩码、乘法、广播、横向求和、通道移位。
   3. **宽立即数 / 常量拼接**：`wli`/`wins` 把 16 位立即数放到 8 个槽位中任意一个，汇编器的 `li` 伪指令自动选出最短序列。
+- **v3 两级特权（supervisor/user）**：`status.U/PU` 位，`eret` 才能进入用户态；用户态执行 CSR 读写、`eret`、`halt`、`csetepcc` 触发特权违例（cause 9）；用户态用非能力（无 tag）指针访存必须落在 `[ubase, ubound)` 窗口内，否则特权违例——MMIO 只能通过内核授予的能力访问；`ecall`（cause 8）陷入内核。示例 `programs/kernel.s`：两个用户任务、定时器抢占、ecall 打印。
 - **异常**：非法指令、能力错误（tag/边界/权限/密封）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
 - **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
@@ -39,7 +40,7 @@
 | Virtual address space | 2^128 bytes, byte addressed, little-endian |
 | Instruction size | fixed 32 bits, 4-byte aligned |
 | Memory access sizes | 8, 16, 32, 64, 128 bits; naturally aligned |
-| Privilege | single (machine) level in v1 |
+| Privilege | **v3:** two levels, supervisor (reset) and user (§6.2) |
 | Distinguishing features | capabilities, SIMD-in-GPR, wide immediates |
 
 ### 1.1 Why a fixed 32-bit encoding (and not 64-bit)
@@ -118,6 +119,7 @@ At reset all registers read as zero and untagged, except `rc` (r63), which holds
 | 0x30–0x35 | `beq bne blt bge bltu bgeu` | B |
 | 0x38 | `jal` | J |
 | 0x39 | `jalr` | I |
+| 0x3B | `ecall` (v3) | I |
 | 0x3C | `halt rs1` | I |
 | 0x3D | `csrr rd, csr` (csr in imm14) | I |
 | 0x3E | `csrw csr, rs1` | I |
@@ -194,9 +196,11 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 
 ### 4.5 System
 
-* `halt rs1` — stop the machine; exit code = rs1[31:0].
+* `halt rs1` — stop the machine; exit code = rs1[31:0]. *(Privileged.)*
+* `ecall` — environment call: always traps with cause 8 (`tval = 0`, `epc` = the ecall); the handler adds 4 to `epc`.
 * `csrr rd, csr` / `csrw csr, rs1` — read/write a 128-bit CSR (value only).
-* `eret` — pc = epc & ~3; PCC ← EPCC; `status.IE ← status.PIE`, `status.PIE ← 1`.
+* `eret` — pc = epc & ~3; PCC ← EPCC; `status.IE ← status.PIE`, `status.PIE ← 1`, **`status.U ← status.PU`,
+  `status.PU ← 0`** (v3). *(Privileged.)*
 
 | CSR | # | Meaning |
 |---|---|---|
@@ -205,7 +209,9 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 | `cause` | 2 | trap cause code |
 | `tval` | 3 | faulting address / instruction word / capability address |
 | `scratch` | 4 | free for the handler |
-| `status` | 5 | bit0 **IE** (global interrupt enable), bit1 **PIE** (IE before the last trap), bit2 **TIE** (timer interrupt enable); other bits read 0, writes to them are ignored |
+| `status` | 5 | bit0 **IE** (global interrupt enable), bit1 **PIE** (IE before the last trap), bit2 **TIE** (timer interrupt enable), **v3:** bit3 **U** (current mode is user; read-only to `csrw`), bit4 **PU** (mode before the last trap was user); other bits read 0, writes to them are ignored |
+| `ubase` | 6 | **v3:** lowest address user mode may reach through an untagged base (§6.2) |
+| `ubound` | 7 | **v3:** end (exclusive) of the user window for untagged accesses (§6.2) |
 
 ## 5. Distinguishing features
 
@@ -430,20 +436,22 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 
 | cause | Name | Raised by |
 |---|---|---|
-| 1 | illegal-instruction | undefined opcode/func, `vmul.d`, CSR number ≥ 6, the zero word (`tval` = instruction word) |
+| 1 | illegal-instruction | undefined opcode/func, `vmul.d`, CSR number ≥ 8, the zero word (`tval` = instruction word) |
 | 2 | capability-tag | `csetbnd(i)`, `cjalr`, `csetepcc`, `cseal`, `cunseal` on an untagged register |
 | 3 | capability-bounds | out-of-bounds access through a capability; non-monotonic `csetbnd(i)` |
 | 4 | capability-permission | load/store through a capability lacking LOAD/STORE; `csc` of a tagged value through a capability lacking STORE_CAP |
 | 5 | misaligned | access not naturally aligned |
 | 6 | access-fault | data access outside RAM and MMIO; instruction fetch outside RAM (`tval` = pc) |
 | 7 | capability-sealed | use or modification of a sealed capability; `cseal` of a sealed one; `cunseal` of an unsealed one, a sentry, or with the wrong otype; `cjalr` through a non-sentry sealed capability; `cinvoke` operand checks (§5.1.4) |
+| 8 | environment-call | `ecall` (`tval` = 0) |
+| 9 | privilege-violation | user mode: privileged instruction (`tval` = instruction word), untagged-base access outside `[ubase, ubound)` (`tval` = ea) |
 
 Capability faults on instruction fetch (PCC lacks EXEC / pc outside PCC) use causes 4 / 3 with `tval` = pc;
 `cjalr` raises 2 / 4 for an untagged / non-executable target.
 
 Traps are **precise**: the trapping instruction has no architectural effect, everything older has completed.
-On a trap: `epc ← pc`, `cause`, `tval` are written, EPCC ← PCC and PCC ← root, `status.PIE ← status.IE` and
-`status.IE ← 0`; if `tvec ≠ 0` then `pc ← tvec & ~3`, otherwise the machine halts reporting the cause.
+On a trap: `epc ← pc`, `cause`, `tval` are written, EPCC ← PCC and PCC ← root, `status.PIE ← status.IE`,
+`status.IE ← 0`, `status.PU ← status.U`, `status.U ← 0` (every trap and interrupt enters supervisor mode); if `tvec ≠ 0` then `pc ← tvec & ~3`, otherwise the machine halts reporting the cause.
 A handler resumes with `eret` (adding 4 to `epc` first to skip the instruction).
 
 ### 6.1 Machine timer interrupt
@@ -467,6 +475,38 @@ reset — every instruction that completes without trapping counts once (traps a
   MMIO + 0x40 sets `mtimecmp` to the stored data zero-extended from its size; other stores to these two
   registers are ignored.
 * Commit traces record an interrupt as `I 1 <epc>` (synchronous traps: `T cause epc tval`).
+
+### 6.2 Privilege levels (v3): supervisor and user
+
+The machine runs in **supervisor** mode (`status.U = 0`, reset) or **user** mode (`status.U = 1`). The mode only
+changes at a trap/interrupt (→ supervisor, old mode saved in PU) and at `eret` (U ← PU); `csrw status` can set PU but
+never U, so the only way into user mode is `eret` with PU = 1, which also installs the EPCC chosen by the kernel.
+
+In user mode:
+
+1. **Privileged instructions** raise *privilege-violation* (cause 9, `tval` = instruction word): `csrr`/`csrw` of
+   any implemented CSR (an unimplemented CSR number is still *illegal-instruction*), `eret`, `halt`, `csetepcc`.
+   The privilege check comes before the instruction's own operand checks (e.g. `csetepcc r0` is cause 9, not 2).
+2. **Untagged (hybrid) data accesses** must satisfy `ubase ≤ ea` and `ea + size ≤ ubound`, otherwise
+   *privilege-violation* with `tval = ea`. This check replaces the misaligned/access-fault checks for such accesses
+   (it is evaluated right after the capability checks, which do not apply to untagged bases). Consequently user mode
+   cannot touch the MMIO page, the timer, or kernel memory through a plain integer pointer.
+3. **Tagged bases are checked by the capability only.** A kernel grants device or memory access by handing the
+   task a bounded capability (e.g. 16 bytes over the console register with STORE only) — authority is explicit and
+   unforgeable, and the window is only the "legacy" path.
+4. `ecall` traps with cause 8 in either mode; the kernel distinguishes callers by `status.PU`.
+5. Instruction fetch is governed by the PCC as before; a kernel bounds each task's code with the EPCC it installs.
+   Every trap still enters the handler with PCC = root, so the kernel can recover full authority with `cgetpcc`
+   even after it has cleared `rc` from user-visible registers.
+
+Timer interrupts preempt user code exactly as in §6.1 (delivery is precise; PU records that the interrupted code was
+user mode, so the handler's `eret` returns to it). A kernel entering user mode should clear `status.IE` before
+writing `epc` (an interrupt between `csrw epc` and `eret` would overwrite `epc`), and set PIE so that `eret`
+re-enables interrupts.
+
+Example (`programs/kernel.s`): two user tasks with their own PCC and window, round-robin preemption every 200
+retired instructions, `ecall` services putc/exit, one task printing through a console capability and then being
+killed for an untagged MMIO store (cause 9).
 
 ## 7. Memory map (reference implementation)
 
@@ -496,7 +536,8 @@ label:  op operands      # comment   (';' also starts a comment)
 ## 9. Known limitations (deliberate)
 
 * No global/local permission, no separate LOAD_MUTABLE / PERMIT_CINVOKE bits (STORE plays the LM role, §5.1.5).
-* Single privilege level; `rc` is the only root of authority after reset.
+* Two privilege levels only; no per-mode CSR views (user mode cannot read any CSR); EPCC is write-only
+  (`csetepcc`), so a kernel tracks each task's PCC itself; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
 * One interrupt source (the deterministic machine timer); no external/software interrupts, no wall-clock time base.
 * No FPU, no atomics, no fence for self-modifying code.

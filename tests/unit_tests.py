@@ -833,6 +833,117 @@ mend:   cjalr r0, r1             # return through the caller's sentry
         candperm r32, r31, r7
         cgetperm r33, r32
 """ + POST + handler + DATA
+    # ---------------- v3: user / supervisor privilege
+    phandler = """
+phandler: csrr r50, cause
+        csrr r51, epc
+        csrr r52, tval
+        csrr r49, status
+        addi r53, r53, 1
+        bltz r50, pirq
+        addi r51, r51, 4
+        csrw epc, r51
+        li r48, 8
+        bne r50, r48, pret
+        andi r49, r49, -17       # ecall: return to supervisor mode (PU <- 0)
+        csrw status, r49
+pret:   eret
+pirq:   addi r47, r47, 1         # timer: re-arm, resume where interrupted (same mode)
+        li r46, -0x10000
+        lq r45, 0x30(r46)
+        addi r45, r45, 7
+        sq r45, 0x40(r46)
+        eret
+"""
+    psetup = "        la r4, phandler\n        csrw tvec, r4\n        la r5, data\n"
+    def enter_user(lbl, st=0x10):
+        return f"        la r6, {lbl}\n        csrw epc, r6\n        li r7, {st}\n        csrw status, r7\n        eret\n"
+    T["priv_basic"] = PRE + psetup + """
+        li r7, 0x1F
+        csrw status, r7          # U is read-only to csrw: reads back 0x17
+        csrr r8, status
+        csrw status, r0
+""" + enter_user("user1") + """
+user1:  csrr r21, status         # first user instruction is privileged -> privilege-violation (tval = word)
+        addi r20, r20, 1
+        csrw scratch, r20        # -> privilege-violation
+        .word 0x0024003d         # csrr of CSR 9: illegal-instruction beats privilege
+        halt zero                # -> privilege-violation (does not stop the machine)
+        csetepcc rc              # -> privilege-violation
+        csetepcc r0              # privilege beats cap-tag
+        eret                     # -> privilege-violation
+        cgetpcc r22              # unprivileged capability ops still work
+        mv r23, r50
+        ecall                    # -> cause 8, handler returns in supervisor mode
+        csrr r24, status         # supervisor again
+        ecall                    # ecall from supervisor: cause 8, PU = 0
+        csrr r25, cause
+        csrw status, r0
+        li r7, 0x10
+        csrw status, r7          # PU set, then eret right behind it (CSR write in MEM -> eret)
+        la r6, user2
+        csrw epc, r6
+        eret
+user2:  lq r26, 0(r5)            # hybrid access with an empty user window -> privilege-violation
+        addi r27, r26, 1         # load-use after the faulting load
+        ecall
+        halt zero
+""" + phandler + DATA
+    T["priv_mem"] = PRE + psetup + """
+        addi r6, r5, 32
+        csrw ubase, r6           # user window for untagged bases = [data+32, data+64)
+        addi r6, r5, 64
+        csrw ubound, r6
+        csrr r7, ubase
+        csrr r8, ubound
+        li r9, -0x10000
+        csetaddr r10, rc, r9
+        csetbndi r10, r10, 16    # capability to the console register only
+        csetaddr r11, rc, r5
+        li r12, 96
+        csetbnd r11, r11, r12    # capability to the data area
+        lq r13, 0(r5)            # supervisor: window does not apply
+""" + enter_user("u2") + """
+u2:     lq r20, 32(r5)           # in window
+        ld r21, 56(r5)           # ends exactly at ubound
+        lq r22, 16(r5)           # below ubase -> privilege-violation (tval = ea)
+        lq r23, 64(r5)           # at ubound -> privilege-violation
+        ld r24, 60(r5)           # straddles ubound and misaligned: privilege wins
+        lw r25, 34(r5)           # misaligned inside the window -> misaligned
+        sq r20, 48(r5)           # store in window
+        sq r21, 16(r5)           # store outside -> privilege-violation, must not happen
+        lq r22, 16(r5)
+        sb r20, 0(r9)            # console through an untagged base -> privilege-violation
+        li r26, 85
+        sb r26, 0(r10)           # console through a capability: allowed ('U')
+        sb r26, 16(r10)          # capability bounds -> cap-bounds
+        lq r27, 0(r11)           # tagged base outside the window: capability-checked only
+        lq r28, 0x30(r9)         # mtime through an untagged base -> privilege-violation
+        csc r11, 48(r5)
+        clc r29, 48(r5)          # tagged memory in the window
+        lq r30, 4096(r0)
+        sd r20, 0x10(r9)         # EXIT through an untagged base -> privilege-violation, no halt
+        li r31, 77
+        ecall
+        csrw ubound, r0
+        lq r32, 48(r5)
+        halt zero
+""" + phandler + DATA
+    T["priv_irq"] = PRE + psetup + """
+        li r9, -0x10000
+        li r6, 30
+        sq r6, 0x40(r9)          # mtimecmp
+""" + enter_user("u3", 0x16) + """
+u3:     li r20, 25               # user loop, preempted by the timer every few instructions
+uloop:  addi r21, r21, 3
+        add r22, r22, r21
+        addi r20, r20, -1
+        bnez r20, uloop
+        csrr r23, status         # still user after the interrupts -> privilege-violation
+        ecall
+        csrr r24, status
+        halt zero
+""" + phandler + DATA
     T["seal_hazards"] = PRE + setup + """
         li r6, 7
         csetaddr r11, rc, r6

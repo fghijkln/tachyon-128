@@ -116,6 +116,10 @@ class Machine:
         self.halted = None          # ('exit', code) | ('trap', cause)
         self.exit_code = 0
 
+    @property
+    def user(self):
+        return bool(self.csr[CSR_STATUS] & ST_U)
+
     # ---------------------------------------------------------------- register helpers
     def rd_write(self, rd, v, tag=0, meta=NULL_META):
         if rd == 0:
@@ -138,6 +142,8 @@ class Machine:
                 raise Trap(CAUSE_CAP_PERM, ea)
             if ea < base or ea + size > top:
                 raise Trap(CAUSE_CAP_BOUNDS, ea)
+        elif self.user and not (self.csr[CSR_UBASE] <= ea and ea + size <= self.csr[CSR_UBOUND]):
+            raise Trap(CAUSE_PRIV, ea)      # user-mode hybrid access outside [ubase, ubound)
         if ea % size:
             raise Trap(CAUSE_ALIGN, ea)
         if ea + size <= len(self.ram):
@@ -222,6 +228,9 @@ class Machine:
         w = struct.unpack_from("<I", self.ram, pc)[0]
         f = fields(w)
         op, rd, rs1, rs2, func = f["op"], f["rd"], f["rs1"], f["rs2"], f["func"]
+        if self.user and (op in (OP_ERET, OP_HALT) or (op in (OP_CSRR, OP_CSRW) and f["uimm14"] < NUM_CSRS)
+                          or (op == OP_CAP and func < len(CAP_FUNCS) and CAP_FUNCS[func] == "csetepcc")):
+            raise Trap(CAUSE_PRIV, w)       # privileged instruction in user mode
         A = f["rd"]                       # field A (store data / branch rs2 / wins source)
         x1, x2 = self.val[rs1], self.val[rs2]
         npc = (pc + 4) & MASK
@@ -378,6 +387,8 @@ class Machine:
             wrote = self.rd_write(rd, pc + 4)
         elif op == OP_HALT:
             self._halt = x1 & 0xFFFFFFFF
+        elif op == OP_ECALL:
+            raise Trap(CAUSE_ECALL, 0)
         elif op == OP_CSRR:
             if f["uimm14"] >= NUM_CSRS:
                 raise Trap(CAUSE_ILLEGAL, w)
@@ -385,12 +396,14 @@ class Machine:
         elif op == OP_CSRW:
             if f["uimm14"] >= NUM_CSRS:
                 raise Trap(CAUSE_ILLEGAL, w)
-            self.csr[f["uimm14"]] = x1 & STATUS_MASK if f["uimm14"] == CSR_STATUS else x1
+            if f["uimm14"] == CSR_STATUS:     # U is read-only to csrw
+                x1 = (x1 & STATUS_WMASK) | (self.csr[CSR_STATUS] & ST_U)
+            self.csr[f["uimm14"]] = x1
         elif op == OP_ERET:
             npc = self.csr[1] & ~3
             self._new_pcc = self.epcc
-            st = self.csr[CSR_STATUS]       # IE <- PIE, PIE <- 1
-            self.csr[CSR_STATUS] = (st & ST_TIE) | ST_PIE | (ST_IE if st & ST_PIE else 0)
+            st = self.csr[CSR_STATUS]       # IE <- PIE, PIE <- 1, U <- PU, PU <- 0
+            self.csr[CSR_STATUS] = (st & ST_TIE) | ST_PIE | (ST_IE if st & ST_PIE else 0) | (ST_U if st & ST_PU else 0)
         else:
             raise Trap(CAUSE_ILLEGAL, w)
         return pc, npc, wrote
@@ -467,8 +480,8 @@ class Machine:
 
     def enter_trap(self, cause, tval):
         """Common trap/interrupt entry: epc, cause, tval, EPCC, status.PIE <- IE, IE <- 0."""
-        st = self.csr[CSR_STATUS]
-        self.csr[CSR_STATUS] = (st & ST_TIE) | (ST_PIE if st & ST_IE else 0)
+        st = self.csr[CSR_STATUS]           # PU <- U, U <- 0 (traps enter supervisor mode)
+        self.csr[CSR_STATUS] = (st & ST_TIE) | (ST_PIE if st & ST_IE else 0) | (ST_PU if st & ST_U else 0)
         self.csr[1], self.csr[2], self.csr[3] = self.pc, cause, tval
         self.epcc, self.pcc = self.pcc, ROOT_META   # handler runs with the root PCC
         if self.csr[0] == 0:

@@ -250,6 +250,9 @@ class Assembler:
         if mn == "eret":
             need(0)
             return [enc_i(OP_ERET, 0, 0, 0)]
+        if mn == "ecall":
+            need(0)
+            return [enc_i(OP_ECALL, 0, 0, 0)]
 
         # ---- pseudo-ops
         if mn == "nop":

@@ -46,7 +46,7 @@ module tx_core #(
   // decoded instruction class bits
   localparam int K_ALUR = 0, K_MD = 1, K_SIMD = 2, K_CAPR = 3, K_ALUI = 4, K_CAPI = 5, K_WIDE = 6,
                  K_LOAD = 7, K_STORE = 8, K_BR = 9, K_JAL = 10, K_JALR = 11, K_HALT = 12,
-                 K_CSRR = 13, K_CSRW = 14, K_ERET = 15, K_ILL = 16, NK = 17;
+                 K_CSRR = 13, K_CSRW = 14, K_ERET = 15, K_ILL = 16, K_ECALL = 17, NK = 18;
 
   function automatic logic [NK-1:0] decode(input logic [31:0] i);
     logic [5:0] op; logic [7:0] fn; logic [NK-1:0] k;
@@ -69,6 +69,7 @@ module tx_core #(
       OP_CSRR:   if (i[31:18] < N_CSR) k[K_CSRR] = 1; else k[K_ILL] = 1;
       OP_CSRW:   if (i[31:18] < N_CSR) k[K_CSRW] = 1; else k[K_ILL] = 1;
       OP_ERET:   k[K_ERET] = 1;
+      OP_ECALL:  k[K_ECALL] = 1;
       default:   k[K_ILL] = 1;
     endcase
     decode = k;
@@ -98,14 +99,17 @@ module tx_core #(
   logic [31:0]  idex_inst;
   logic [5:0]   idex_rs1, idex_rs2, idex_rd;
   // EX/MEM
-  logic         exmem_valid, exmem_we, exmem_load, exmem_store, exmem_trap, exmem_csrr,
+  logic         exmem_valid, exmem_we, exmem_load, exmem_store, exmem_trap0, exmem_csrr,
                 exmem_csrw, exmem_eret, exmem_halt, exmem_mmio, exmem_clc, exmem_csc, exmem_ldcap, exmem_ldro;
   logic [MW-1:0] exmem_smeta, exmem_tmeta;
   logic         exmem_cjalr, exmem_setepcc;
-  logic [127:0] exmem_pc, exmem_val, exmem_ea, exmem_sdata, exmem_tval;
+  logic [127:0] exmem_pc, exmem_val, exmem_ea, exmem_sdata, exmem_tval0;
+  logic [128:0] exmem_eaend;
+  logic         exmem_priv, exmem_hyb;     // privileged instruction / untagged-base memory access
+  logic [31:0]  exmem_inst;
   logic [MW-1:0] exmem_meta;
   logic [5:0]   exmem_rd, exmem_op;
-  logic [3:0]   exmem_cause;
+  logic [3:0]   exmem_cause0;
   logic [2:0]   exmem_csr;
   logic [31:0]  exmem_code;
   // MEM/WB
@@ -117,7 +121,16 @@ module tx_core #(
   logic [31:0]  memwb_code;
   // CSRs
   logic [127:0] csr_tvec, csr_epc, csr_cause, csr_tval, csr_scratch;
-  logic [2:0]   csr_status;            // {TIE, PIE, IE}
+  logic [4:0]   csr_status;            // {PU, U, TIE, PIE, IE}
+  logic [127:0] csr_ubase, csr_ubound;  // user-mode window for untagged (hybrid) data accesses
+  // ---- privilege check (MEM): user mode may not execute privileged instructions, and its untagged-base
+  //      accesses must lie in [ubase, ubound). The violation replaces any trap EX found for the instruction.
+  wire          mode_user = csr_status[3];
+  wire          hyb_out   = (exmem_ea < csr_ubase) | (exmem_eaend > {1'b0, csr_ubound});
+  wire          mem_priv  = mode_user & (exmem_priv | (exmem_hyb & hyb_out));
+  wire          exmem_trap  = exmem_trap0 | mem_priv;
+  wire [3:0]    exmem_cause = mem_priv ? C_PRIV : exmem_cause0;
+  wire [127:0]  exmem_tval  = mem_priv ? (exmem_priv ? {96'd0, exmem_inst} : exmem_ea) : exmem_tval0;
   // deterministic timer: mtime = instructions retired (counted as they pass MEM)
   logic [127:0] mtime_q, mtimecmp_q;
 
@@ -412,6 +425,7 @@ module tx_core #(
     else if (ex_k[K_ILL]) begin ex_trap = 1'b1; ex_cause = C_ILLEGAL; ex_tval = {96'd0, idex_inst}; end
     else if (is_mem && mem_fault) begin ex_trap = 1'b1; ex_cause = mem_cause; ex_tval = ea; end
     else if ((ex_k[K_CAPR] | ex_k[K_CAPI]) && cap_fault) begin ex_trap = 1'b1; ex_cause = cap_cause; ex_tval = cap_tv; end
+    else if (ex_k[K_ECALL]) begin ex_trap = 1'b1; ex_cause = C_ECALL; ex_tval = '0; end
   end
 
   // ======================================================================== MEM
@@ -475,7 +489,9 @@ module tx_core #(
       3'd2: csr_rd = csr_cause;
       3'd3: csr_rd = csr_tval;
       3'd4: csr_rd = csr_scratch;
-      default: csr_rd = {125'd0, csr_status};
+      3'd5: csr_rd = {123'd0, csr_status};
+      3'd6: csr_rd = csr_ubase;
+      default: csr_rd = csr_ubound;
     endcase
 
   wire mem_trap      = (mem_v & exmem_trap) | mem_irq;
@@ -496,7 +512,7 @@ module tx_core #(
       fpcc_q <= ROOT_META; pcc_q <= ROOT_META; epcc_q <= ROOT_META;
       ifid_valid <= 1'b0; idex_valid <= 1'b0; exmem_valid <= 1'b0; memwb_valid <= 1'b0;
       csr_tvec <= '0; csr_epc <= '0; csr_cause <= '0; csr_tval <= '0; csr_scratch <= '0;
-      csr_status <= '0; mtime_q <= '0; mtimecmp_q <= {128{1'b1}};
+      csr_status <= '0; csr_ubase <= '0; csr_ubound <= '0; mtime_q <= '0; mtimecmp_q <= {128{1'b1}};
     end else if (!halted_q) begin
       // ---------------- PC
       if (mem_redirect)      pc_q <= mem_target;
@@ -558,9 +574,13 @@ module tx_core #(
         exmem_csc   <= is_csc;
         exmem_ldcap <= ~a_tag | a_perm[3];               // LOAD_CAP (or unchecked base)
         exmem_ldro  <= a_tag & ~a_perm[1];               // read-only authority: clc result loses STORE/STORE_CAP
-        exmem_trap  <= ex_trap;
-        exmem_cause <= ex_cause;
-        exmem_tval  <= ex_tval;
+        exmem_trap0  <= ex_trap;
+        exmem_cause0 <= ex_cause;
+        exmem_tval0  <= ex_tval;
+        exmem_inst   <= idex_inst;
+        exmem_eaend  <= ea_end;
+        exmem_priv   <= ex_k[K_CSRR] | ex_k[K_CSRW] | ex_k[K_ERET] | ex_k[K_HALT] | ex_setepcc;
+        exmem_hyb    <= is_mem & ~a_tag;
         exmem_csrr  <= ex_k[K_CSRR];
         exmem_csrw  <= ex_k[K_CSRW];
         exmem_csr   <= idex_inst[20:18];
@@ -581,15 +601,17 @@ module tx_core #(
         csr_epc <= exmem_pc;
         csr_cause <= mem_irq ? {1'b1, 123'd0, IRQ_TIMER} : {124'd0, exmem_cause};
         csr_tval <= mem_irq ? '0 : exmem_tval;
-        csr_status <= {csr_status[2], csr_status[0], 1'b0};       // PIE <- IE, IE <- 0
+        csr_status <= {csr_status[3], 1'b0, csr_status[2], csr_status[0], 1'b0};  // PU <- U, U <- 0, PIE <- IE, IE <- 0
       end else if (mem_eret) begin
-        csr_status <= {csr_status[2], 1'b1, csr_status[1]};       // IE <- PIE, PIE <- 1
+        csr_status <= {1'b0, csr_status[4], csr_status[2], 1'b1, csr_status[1]};  // U <- PU, PU <- 0, IE <- PIE, PIE <- 1
       end else if (mem_v && exmem_csrw) begin
         case (exmem_csr)
           3'd0: csr_tvec <= exmem_val;
           3'd1: csr_epc <= exmem_val;
           3'd2: csr_cause <= exmem_val;
-          3'd5: csr_status <= exmem_val[2:0];
+          3'd5: csr_status <= {exmem_val[4], csr_status[3], exmem_val[2:0]};   // U is read-only
+          3'd6: csr_ubase <= exmem_val;
+          3'd7: csr_ubound <= exmem_val;
           3'd3: csr_tval <= exmem_val;
           3'd4: csr_scratch <= exmem_val;
           default: ;

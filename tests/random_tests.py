@@ -63,9 +63,9 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2])[0]
-        if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke"):
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2])[0]
+        if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user"):
             k = "alu"
         if k == "alu":
             f = r.choice(ALU_FUNCS)
@@ -251,6 +251,35 @@ class Gen:
             self.out.append(f"{Le}:")
             self.emit("cjalr r0, r56")
             self.out.append(f"{La}:")
+        elif k == "user":           # drop to user mode for a block, come back with ecall
+            Lu = self.label()
+            self.emit("csrr r57, status")
+            self.emit("andi r57, r57, -2")             # IE off first: an interrupt here would clobber epc
+            self.emit("ori r57, r57, 16")              # PU
+            if r.random() < 0.5:
+                self.emit("ori r57, r57, 2")           # PIE: interrupts enabled again in user mode
+            self.emit("csrw status, r57")
+            self.emit(f"la r57, {Lu}")
+            self.emit("csrw epc, r57")
+            self.emit("csetepcc rc")
+            self.emit("eret")
+            self.out.append(f"{Lu}:")
+            for _ in range(r.randint(1, 10)):
+                c = r.random()
+                if c < 0.12:                           # privileged instruction -> privilege-violation
+                    self.emit(r.choice(["csrr r57, status", "csrw scratch, r57", "eret", "halt zero",
+                                        "csetepcc rc", "csrw status, r0"]))
+                elif c < 0.3:                          # hybrid access around the user window
+                    f = r.choice(["lq", "ld", "lbu", "sq", "sd", "sb"])
+                    if f[0] == "s":
+                        self.emit(f"{f} r{self.src()}, {r.randrange(0, 1100, 8)}(r3)")   # never below data (code)
+                    else:
+                        self.emit(f"{f} r{self.dst()}, {r.randrange(-64, 1100, 8)}(r3)")
+                elif c < 0.36:
+                    self.emit(f"{r.choice(['lq', 'sb'])} r{self.src()}, {r.choice([0, 0x30, 0x10])}(r52)")  # MMIO
+                else:
+                    self.one(allow_ctrl=False)
+            self.emit("ecall")
         elif k == "csr":
             if r.random() < 0.5:
                 self.emit(f"csrw scratch, r{self.src()}")
@@ -286,6 +315,10 @@ def gen_program(seed, n=None):
     g.emit(f"li r54, {r.choice([0, 1, 1, 2, 3, 3, 0x10000])}")
     g.emit("csetaddr r55, r55, r54")
     g.emit("li r52, -0x10000")              # MMIO base (timer registers at +0x30 / +0x40)
+    g.emit(f"addi r57, r3, {r.randrange(-64, 700, 16)}")      # user-mode window for untagged accesses
+    g.emit("csrw ubase, r57")
+    g.emit(f"addi r57, r57, {r.randrange(0, 600, 8)}")
+    g.emit("csrw ubound, r57")
     for reg in POOL:
         if r.random() < 0.8:
             g.emit(f"li r{reg}, {g.val()}")
@@ -303,6 +336,12 @@ def gen_program(seed, n=None):
     g.out.append("handler:")
     g.emit("csrr r62, cause")
     g.emit("bltz r62, Hirq")
+    g.emit("li r59, 8")
+    g.emit("bne r62, r59, Hnotecall")
+    g.emit("csrr r59, status")             # ecall: return to supervisor mode
+    g.emit("andi r59, r59, -17")
+    g.emit("csrw status, r59")
+    g.out.append("Hnotecall:")
     g.emit("csrr r59, epc")
     g.emit("csrr r58, tval")
     g.emit("bne r58, r59, Hskip")

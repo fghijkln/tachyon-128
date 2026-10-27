@@ -41,6 +41,13 @@ MUTANTS = [
     ("cinvoke_no_otype_match", "tx_core.sv", " || mb[M_OT +: 16] != a_ot)", ")"),
     ("clc_no_ro_attenuation", "tx_core.sv", "clc_ro   = exmem_ldro &", "clc_ro   = 1'b0 &"),
     ("pcc_keeps_sentry_seal", "tx_core.sv", "ma_unsealed = {ma[M_TAG], 16'd0, ma[M_OT-1:0]};", "ma_unsealed = ma;"),
+    ("priv_csr_in_user_allowed", "tx_core.sv", "exmem_priv   <= ex_k[K_CSRR] | ", "exmem_priv   <= "),
+    ("user_window_no_lower_check", "tx_core.sv", "hyb_out   = (exmem_ea < csr_ubase) |", "hyb_out   = 1'b0 |"),
+    ("eret_no_mode_restore", "tx_core.sv", "{1'b0, csr_status[4], csr_status[2], 1'b1, csr_status[1]}",
+     "{1'b0, 1'b0, csr_status[2], 1'b1, csr_status[1]}"),
+    ("csrw_can_set_user_bit", "tx_core.sv", "{exmem_val[4], csr_status[3], exmem_val[2:0]}", "exmem_val[4:0]"),
+    ("priv_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store & ~exmem_trap &",
+     "assign dmem_we    = mem_v & exmem_store & ~exmem_trap0 &"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

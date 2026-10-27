@@ -36,6 +36,7 @@ OP_CSC = 0x2D      # csc rA, imm(rs1): 128-bit capability store (tag + metadata 
 OP_BEQ, OP_BNE, OP_BLT, OP_BGE, OP_BLTU, OP_BGEU = range(0x30, 0x36)
 OP_JAL = 0x38
 OP_JALR = 0x39
+OP_ECALL = 0x3B    # ecall: environment call -> trap (cause 8) into supervisor mode
 OP_HALT = 0x3C
 OP_CSRR = 0x3D
 OP_CSRW = 0x3E
@@ -72,11 +73,15 @@ CAP_STORE_OPS = {"csc": OP_CSC}
 BRANCH_OPS = {"beq": OP_BEQ, "bne": OP_BNE, "blt": OP_BLT, "bge": OP_BGE, "bltu": OP_BLTU, "bgeu": OP_BGEU}
 
 # ---------------------------------------------------------------- CSRs
-CSR_NAMES = {"tvec": 0, "epc": 1, "cause": 2, "tval": 3, "scratch": 4, "status": 5}
-NUM_CSRS = 6
+CSR_NAMES = {"tvec": 0, "epc": 1, "cause": 2, "tval": 3, "scratch": 4, "status": 5,
+             "ubase": 6, "ubound": 7}
+NUM_CSRS = 8
 CSR_STATUS = 5
+CSR_UBASE, CSR_UBOUND = 6, 7             # user-mode window for untagged (hybrid) data accesses
 ST_IE, ST_PIE, ST_TIE = 1, 2, 4          # status bits: global enable, previous enable, timer enable
-STATUS_MASK = 7
+ST_U, ST_PU = 8, 16                      # current mode is user / mode before the last trap was user
+STATUS_MASK = 0x1F
+STATUS_WMASK = 0x17                      # csrw status cannot change U (only traps and eret do)
 IRQ_FLAG = 1 << 127                      # cause bit 127 = interrupt
 IRQ_TIMER = 1                            # interrupt code
 
@@ -88,8 +93,11 @@ CAUSE_CAP_PERM = 4
 CAUSE_ALIGN = 5
 CAUSE_ACCESS = 6
 CAUSE_CAP_SEALED = 7
+CAUSE_ECALL = 8
+CAUSE_PRIV = 9
 CAUSE_NAMES = {1: "illegal-instruction", 2: "capability-tag", 3: "capability-bounds",
-               4: "capability-permission", 5: "misaligned", 6: "access-fault", 7: "capability-sealed"}
+               4: "capability-permission", 5: "misaligned", 6: "access-fault", 7: "capability-sealed",
+               8: "environment-call", 9: "privilege-violation"}
 
 # capability permissions
 PERM_LOAD, PERM_STORE, PERM_EXEC, PERM_LOAD_CAP, PERM_STORE_CAP, PERM_SEAL, PERM_UNSEAL = 1, 2, 4, 8, 16, 32, 64
