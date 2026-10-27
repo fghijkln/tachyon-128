@@ -8,4 +8,12 @@ calling convention and data model.
 python3 cc/tcc128.py prog.c --run          # compile + run on the golden simulator
 python3 cc/tests/run_tests.py --both       # C test suite (-O and -O0)
 python3 cc/bench/run_bench.py --rtl        # benchmarks with RTL cycles/CPI
+python3 cc/tcc128.py prog.c -mpurecap --run           # pure-capability code
+python3 cc/tests/run_tests.py --purecap               # purecap suite + capability-fault tests
 ```
+
+`-mpurecap` compiles every pointer as a bounded capability (stack objects, globals, string literals,
+`malloc` blocks) and runs `main` in user mode with an empty untagged window, so buffer overflows,
+writes through read-only views and dereferences of forged pointers trap in hardware. All 85 C tests
+pass in purecap mode (92/92 with the 7 fault tests, `-O` and `-O0`); benchmark overhead is +0.005% to
++3.5% cycles. See `cc/README.md` and `cc/ABI.md` §8.

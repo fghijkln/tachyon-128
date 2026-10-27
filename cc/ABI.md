@@ -121,9 +121,36 @@ code with every *reachable* function and object of all translation units and the
 with flags `- 0 + space #`, width, precision, `*`, and the length modifiers `hh h l ll z t j`, plus
 `L`/`q` for 128-bit integers (`%Ld`, `%Lu`, `%Lx`) — an extension, since there is no `long double`.
 
-## 8. Capabilities (future mode)
+## 8. Pure-capability mode (`-mpurecap`)
 
 The default ABI never creates tagged values, so programs run identically whether or not the
-kernel restricts `rc`. A pure-capability mode (pointers as tagged 128-bit capabilities derived
-from `rc`, `clc`/`csc` for pointer loads/stores, bounds set by `csetbnd` at `malloc`/`&` sites)
-would keep the same register roles and frame layout; it is not implemented yet.
+kernel restricts `rc`. `-mpurecap` (predefines `__PURECAP__` and `__CHERI_PURE_CAPABILITY__`) keeps the
+same data model, register roles and frame layout (pointers were already 16 bytes), but every pointer is
+a tagged capability and every memory access goes through one:
+
+* **Roots** (`cc/lib/crt0_purecap.s`): `gp` = RAM capability `[0, 256 KiB)` derived from `rc` with
+  `PERM_ALL & ~(EXEC|SEAL|UNSEAL|CINVOKE)` (0x59B); `sp` = `gp` with its cursor at the top of RAM; the
+  PCC is narrowed to the code image `[0, __end)` with EXEC|LOAD|LOAD_CAP|GLOBAL. `__tx_mmio` holds a
+  capability for the 64 KiB MMIO page (`tx128.h` builds `TX_CONSOLE`/`TX_EXIT`/... from it).
+* **User mode, empty untagged window**: crt0 sets `ubase = ubound = 0` and enters `main` with `eret`
+  (status.PU), so any load/store through an *untagged* base (a pointer rebuilt from an integer) is a
+  privilege violation (cause 9). Hardware therefore enforces that purecap code touches memory only via
+  capabilities.
+* **Bounds** (`csetbndi`/`csetbnd`): `&local` / arrays on the stack are bounded to the frame object;
+  globals and string literals to the object (`la` → `csetaddr gp` → `csetbnd`); `malloc(n)` returns a
+  capability of exactly `n` bytes (`realloc`/`free` re-derive the header from the allocator's own
+  capability); jump tables are read through a capability bounded to the table. Initialised pointer
+  slots in static data (`const char *words[] = {...}`) are rebuilt at start-up from the linker's
+  `__cap_relocs` table `{slot, target, size, addend}` (size −1 = function, derived from the PCC).
+* **Code generation**: pointer arithmetic is `cincaddr`/`cincaddri` (keeps the tag; integer `add`
+  would clear it); every 16-byte load/store is `clc`/`csc` so pointers, `uintptr_t` and struct copies
+  keep their tags (word-aligned `memcpy`/`qsort` swaps move whole 16-byte granules); register moves are
+  `cmove`; function pointers come from `cgetpcc` + `csetaddr`.
+* **Intrinsics** (also accepted, as no-ops/plain values, in the default mode):
+  `__builtin_cheri_bounds_set(p, n)`, `address_set(p, a)`, `perms_and(p, m)`, `tag_get(p)`,
+  `length_get(p)`, `base_get(p)`, `perms_get(p)`.
+* **Faults**: `tvec = __tx_trap` prints `*** capability trap (hardware): cause=N <tval>` and exits
+  with `128 + cause` (3 = bounds, 4 = permission, 9 = untagged access in user mode).
+* **Not covered**: sub-object bounds (a member array is bounded by its enclosing object), the stack
+  pointer itself spans all RAM (only address-taken objects are bounded), no temporal safety (`free`
+  does not revoke), code pointers are bounded to the whole code image, not the function.
