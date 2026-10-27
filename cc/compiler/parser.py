@@ -288,6 +288,20 @@ class Parser:
             return
         if o.is_definition:
             error_at(name, f"redefinition of {name.text}")
+        if getattr(ty, "kr", False) and self.is_typename():
+            decl = {}
+            while self.is_typename():
+                base = self.declspec({})
+                while True:
+                    pty, pn = self.declarator(base)
+                    if pty.is_array():
+                        pty = pointer_to(pty.base)
+                    decl[pn.text] = pty
+                    if not self.consume(","):
+                        break
+                self.expect(";")
+            ty.param_names = [(decl.get(n.text, t), n) for t, n in ty.param_names]
+            ty.params = [t for t, n in ty.param_names]
         o.ty = ty
         o.is_definition = True
         self.cur_fn = o
@@ -616,6 +630,7 @@ class Parser:
         params = []
         names = []
         variadic = False
+        kr = False
         if self.is_("void") and self.peek().text == ")":
             self.next()
             self.next()
@@ -633,10 +648,11 @@ class Parser:
                 variadic = True
                 continue
             if not self.is_typename():
-                # K&R identifier list: treat as int params
+                # K&R identifier list: int unless a declaration list follows
                 nm = self.expect_ident()
                 params.append(INT)
                 names.append((INT, nm))
+                kr = True
                 continue
             base = self.declspec({})
             pty, pname = self.declarator(base)
@@ -648,6 +664,7 @@ class Parser:
             names.append((pty, pname))
         f = func_type(ret, params, variadic)
         f.param_names = names
+        f.kr = kr
         return f
 
     # ------------------------------------------------------------------ statements
