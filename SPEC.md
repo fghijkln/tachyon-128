@@ -266,10 +266,12 @@ sacrificed to compression, and a cursor may move out of bounds without losing th
 be dereferenced there).
 
 **Unforgeability.** The only instructions that produce a tagged result are `csetaddr`, `cincaddr(i)`,
-`csetbnd(i)` and `candperm` (only when their `rs1` is already tagged) and `clc` (only from a granule whose
-shadow tag is set, which only `csc` of a tagged register can set); `cgetpcc` and the `cjalr` link copy the PCC,
-which itself only ever comes from root, a tagged register (`cjalr`, `csetepcc`) or EPCC. Every other write — ALU, ordinary load,
-`mv` (= `addi`), CSR read, link register — clears the tag, and every ordinary store clears the granule's
+`csetbnd(i)` and `candperm` (only when their `rs1` is already tagged), `clc`, `lr` and `amoswap` (v4; only
+from a granule whose shadow tag is set, which only `csc`, `sc` or `amoswap` of a tagged register can set, each under
+the STORE_CAP / STORE_LOCAL rules); `cgetpcc` and the `cjalr` link copy the PCC, which itself only ever comes from
+root, a tagged register (`cjalr`, `csetepcc`) or EPCC, and `cgetepcc` (v4, supervisor-only) copies EPCC, which only
+ever comes from root at reset, the PCC at a trap, or a tagged register (`csetepcc`). Every other write — ALU, ordinary load, arithmetic AMO,
+`mv` (= `addi`), CSR read, link register — clears the tag, and every ordinary store (and arithmetic AMO) clears the granule's
 tag. Tags therefore descend only from the root capability in `rc` at reset.
 
 **Monotonicity.** `csetbnd` may only shrink bounds, `candperm` may only remove permissions.

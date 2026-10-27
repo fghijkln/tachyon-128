@@ -1,6 +1,6 @@
 # TACHYON-128 generic-gate synthesis (Yosys).  Hierarchy is kept and ABC maps each module
 # separately (a flattened ABC run did not finish within 30 min under WebAssembly Yosys).
-# The register-file arrays stay memory macros ($mem_v2, rf_val 64x128b + rf_meta 64x261b,
+# The register-file arrays stay memory macros ($mem_v2, rf_val 64x128b + rf_meta 64x285b,
 # 2 async read ports / 1 write port) as a real implementation would use a register-file compiler.
 script synth/read.ys
 proc
