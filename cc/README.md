@@ -188,6 +188,14 @@ the trap handler prints the cause and faulting address, exit code 128 + cause):
 | 015_sentry_forged | call a function pointer rebuilt from its integer address | cause 2 (tag) |
 | 016_sentry_data_call | call a data buffer cast to a function pointer ("shellcode") | cause 4 (no EXEC) |
 | 017_sentry_modify | `__builtin_cheri_address_set` on a sentry stored in a struct | cause 7 |
+| 020_uaf_read | read through a pointer after `free` | cause 10 (revoked) |
+| 021_uaf_write | write through a pointer after `free` | cause 10 |
+| 022_uaf_double_free | `free` the same block twice (the second `free` probes it) | cause 10 |
+| 023_uaf_alias | free a block, then use a copy of the pointer kept in another heap object | cause 10 |
+| 024_uaf_after_reuse | quarantine fills, sweep runs, `malloc` reuses the address; the stale global pointer is untagged | cause 9 |
+| 025_uaf_realloc | use the old pointer after `realloc` moved the block | cause 10 |
+| 026_uaf_invalid_free | `free` of an interior pointer | `free(): invalid pointer`, abort |
+| 027_uaf_heap_churn | lists/tree/realloc churn across many sweeps; live pointers keep their tags | no trap |
 
 Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** — all 86 normal C tests pass
 unmodified in purecap mode (none excluded) plus the 7 fault tests; every purecap test also matches the
@@ -246,6 +254,16 @@ used by the test scripts). Exact rules: [`ABI.md`](ABI.md) §8.1.
   calling a data pointer with cause 4. `__builtin_cheri_type_get(p)` returns the otype (`0xFFFF` = sentry).
   Sentries keep the whole-image PCC bounds (direct `jal` calls need them); returns stay `ret`. Tests:
   `purecap/011_sentry_ok` (legitimate uses, no trap) and `012`–`017` below.
+* **Heap temporal safety** (`-fno-revoke` / `TCC128_NO_REVOKE=1`): `free` marks the block in the
+  hardware revocation bitmap, so every copy of the freed pointer traps on its next use (cause 10), and puts
+  it in quarantine; double free is caught by a probe load at the top of `free`. When the quarantine reaches
+  max(16 KiB, heap/4) a revocation sweep (`cloadtags` over image, heap and stack; `clc`/`crevtag`/`csc` on
+  each tagged granule; `crevtag` on the callee-saved registers) strips every capability into quarantined
+  memory before it is reused, so a stale pointer can never alias a new object (CHERIvoke/Cornucopia style).
+  Exact rules: [`ABI.md`](ABI.md) §8.2. Tests: `purecap/020`–`027` below. Cost (golden retired
+  instructions, `-O`, `cc/bench/malloc_churn.c`, ~2,500 malloc/free pairs and nothing else):
+  see the overhead table in §8.2 results below; the existing benchmarks do not call `malloc` and are
+  unaffected.
 
 ## Limitations
 

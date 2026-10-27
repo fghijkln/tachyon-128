@@ -14,7 +14,7 @@ int main(void) {
     victim[0] = 'v';
     stale = victim;
     free(victim);
-    for (int i = 0; i < 200; i++)         /* churn: 200 x 64 bytes through the quarantine */
+    for (int i = 0; i < 800; i++)         /* churn: 800 x 64 bytes through the 16 KiB quarantine */
         free(malloc(48));
     printf("sweeps %lu, stale tag %d\n", __tx_revoke_sweeps(), (int)__builtin_cheri_tag_get(stale));
     char *mine = 0;                       /* keep churning until malloc hands out the stale address */

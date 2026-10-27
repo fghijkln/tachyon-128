@@ -154,7 +154,8 @@ a tagged capability and every memory access goes through one:
   `length_get(p)`, `base_get(p)`, `perms_get(p)`.
 * **Faults**: `tvec = __tx_trap` prints `*** capability trap (hardware): cause=N <tval>` and exits
   with `128 + cause` (3 = bounds, 4 = permission, 9 = untagged access in user mode).
-* **Hardening** (v6, §8.1): sub-object bounds, bounded stack region, va_list bounds, function-pointer sentries.
+* **Hardening** (v6, §8.1): sub-object bounds, bounded stack region, va_list bounds, function-pointer sentries;
+  heap temporal safety (use-after-free / double-free detection, §8.2).
 
 ### 8.1 Purecap hardening (v6)
 
@@ -216,3 +217,38 @@ pointer is a *sealed entry capability* (`SPEC.md` §5.1.4, otype `0xFFFF`):
   function pointer (e.g. "shellcode" in a buffer) — no EXEC permission, cause 4. Comparing, testing for NULL,
   printing (`%p`) and storing function pointers work as before. `__builtin_cheri_type_get(p)` (new) returns
   the otype (`0xFFFF` for a sentry).
+
+### 8.2 Heap temporal safety: quarantine + revocation (v6)
+
+Default under `-mpurecap`; `-fno-revoke` / `TCC128_NO_REVOKE=1` (defines `__TX_NO_REVOKE` for libc) gives the
+same allocator without it (the baseline for overhead numbers). Hardware: SPEC.md §5.1.7 (revocation bitmap at
+MMIO + 0x8000, cause 10, `crevtag`, `cloadtags`).
+
+* **Allocator** (`cc/lib/stdlib.c`): every block is a 16-byte header `{size, state}` + payload; `malloc(n)`
+  returns a capability bounded to exactly `n` bytes (`malloc(0)` a unique 1-byte block), so user code never
+  reaches a header. Exact-size free lists for 16..1024-byte payloads, first fit with splitting above. The
+  allocator works through its own RAM capability (base 0, never revoked).
+* **free(p)** first *probes* `p` with a one-byte load: a pointer whose block was already freed traps right
+  there (cause 10 if the block is still in quarantine, cause 9 if a sweep already cleared its tag), so
+  double free and free-after-free are caught in hardware before any allocator state is read. Then it checks
+  that `p` is exactly a live block (tagged, capability base = address, header state LIVE, length ≤ size) and
+  aborts with `*** free(): invalid pointer` otherwise (interior or foreign pointers, `026_uaf_invalid_free`).
+  It marks the payload granules in the revocation bitmap — from this instruction on, **every** copy of `p`
+  and every capability derived from it, in registers or memory, traps with cause 10 on use — and puts the
+  block in quarantine. Quarantined memory is never handed out.
+* **Sweep**: when the quarantine reaches max(16 KiB, heap/4), or `malloc` finds no memory while blocks are
+  quarantined, `__tx_revoke_sweep` (crt0) visits `[0, heap_top)` (image + heap) and the stack region
+  `[0x20000, 0x40000)` 256 bytes at a time with `cloadtags`; each tagged granule is rewritten
+  `clc` → `crevtag` → `csc`, so every capability into a quarantined block loses its tag; the callee-saved
+  registers go through `crevtag` and the caller-saved ones (dead across the call) are zeroed. Only then are
+  the bitmap words covering the heap zeroed and the quarantined blocks moved to the free lists. A stale
+  pointer used after its memory was reused is therefore an untagged value (cause 9 in user mode,
+  `024_uaf_after_reuse`) and can never alias the new owner's object.
+* `realloc` that has to move frees the old block the same way (stale copies of the old pointer trap,
+  `025_uaf_realloc`). `calloc` = `malloc` + `memset`.
+* Statistics: `unsigned long __tx_revoke_sweeps(void)`, `__tx_heap_frees(void)`.
+* Limits: the bitmap capability `__tx_revmap` is an ordinary libc global (no allocator compartment); only
+  heap memory is protected (stack objects are bounded but not revoked when their frame dies); capabilities
+  held in caller-saved registers across a call into `free`/`malloc` are not preserved (the C ABI never does
+  that).
+
