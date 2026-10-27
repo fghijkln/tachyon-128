@@ -67,6 +67,14 @@ MUTANTS = [
      "wire  [15:0] if_ras_top = 1'b0 ? id_link_w :"),
     ("ras_pop_missing", "tx_core.sv", "else ras_sp <= ras_t1;", "else ;"),
     ("ras_btb_ret_bit_ignored", "tx_core.sv", "(btb_ret[if_bi] & ras_on) ?", "1'b0 ?"),
+    ("local_cap_store_unchecked", "tx_core.sv",
+     "else if (a_tag && is_csc && b_tag && !b_perm[P_GLOBAL] && !a_perm[P_STORE_LOCAL]) mem_cause = C_CAP_PERM;", ""),
+    ("local_rule_tests_authority", "tx_core.sv", "!b_perm[P_GLOBAL] && !a_perm[P_STORE_LOCAL]",
+     "!a_perm[P_GLOBAL] && !a_perm[P_STORE_LOCAL]"),
+    ("lm_rule_uses_store_bit", "tx_core.sv", "exmem_ldro  <= a_tag & ~a_perm[P_LM];", "exmem_ldro  <= a_tag & ~a_perm[1];"),
+    ("lm_strip_keeps_lm_bit", "tx_core.sv", "MW'(PERM_LM_STRIP)", "MW'(11'h412)"),
+    ("cinvoke_data_ci_unchecked", "tx_core.sv",
+     "else if (!b_perm[P_CINVOKE]) begin cap_cause = C_CAP_PERM; cap_tv = b; end", ""),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

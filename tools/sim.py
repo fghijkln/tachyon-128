@@ -130,7 +130,7 @@ class Machine:
         return rd
 
     # ---------------------------------------------------------------- memory
-    def check_access(self, rs1, ea, size, is_store, store_cap=False):
+    def check_access(self, rs1, ea, size, is_store, store_cap=False, store_local=False):
         if self.tag[rs1]:
             perm, base, top, otype = self.meta[rs1]
             if otype:
@@ -140,6 +140,8 @@ class Machine:
                 raise Trap(CAUSE_CAP_PERM, ea)
             if store_cap and not perm & PERM_STORE_CAP:
                 raise Trap(CAUSE_CAP_PERM, ea)
+            if store_local and not perm & PERM_STORE_LOCAL:
+                raise Trap(CAUSE_CAP_PERM, ea)      # v4: a local capability needs STORE_LOCAL
             if ea < base or ea + size > top:
                 raise Trap(CAUSE_CAP_BOUNDS, ea)
         elif self.user and not (self.csr[CSR_UBASE] <= ea and ea + size <= self.csr[CSR_UBOUND]):
@@ -198,14 +200,15 @@ class Machine:
         g = ea // GRANULE
         if g in self.mtag and (not self.tag[rs1] or self.meta[rs1][0] & PERM_LOAD_CAP):
             p, b, t, o = self.mtag[g]
-            if self.tag[rs1] and not self.meta[rs1][0] & PERM_STORE and not o:
-                p &= ~(PERM_STORE | PERM_STORE_CAP)     # loaded through a read-only view: deep read-only
+            if self.tag[rs1] and not self.meta[rs1][0] & PERM_LOAD_MUTABLE and not o:
+                p &= ~PERM_LM_STRIP     # v4: authority without LOAD_MUTABLE -> loaded cap is deeply immutable
             return v, 1, (p, b, t, o)
         return v, 0, NULL_META
 
     def store_cap(self, rs1, ea, A):
         """csc: store register A's value and (if tagged) its capability metadata."""
-        kind = self.check_access(rs1, ea, 16, True, store_cap=bool(self.tag[A]))
+        kind = self.check_access(rs1, ea, 16, True, store_cap=bool(self.tag[A]),
+                                 store_local=bool(self.tag[A]) and not self.meta[A][0] & PERM_GLOBAL)
         if kind == "mmio":
             self.store(rs1, ea, 16, self.val[A])
             return
@@ -314,6 +317,10 @@ class Machine:
                     raise Trap(CAUSE_CAP_SEALED, x1)
                 if o2 in (0, OTYPE_SENTRY) or o2 != o1:
                     raise Trap(CAUSE_CAP_SEALED, x2)
+                if not p1 & PERM_CINVOKE:               # v4: both halves need PERMIT_CINVOKE
+                    raise Trap(CAUSE_CAP_PERM, x1)
+                if not p2 & PERM_CINVOKE:
+                    raise Trap(CAUSE_CAP_PERM, x2)
                 if not p1 & PERM_EXEC:
                     raise Trap(CAUSE_CAP_PERM, x1)
                 if p2 & PERM_EXEC:

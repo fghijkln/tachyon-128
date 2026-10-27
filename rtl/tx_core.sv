@@ -385,6 +385,8 @@ module tx_core #(
         else if (!b_tag) begin cap_cause = C_CAP_TAG; cap_tv = b; end
         else if (!a_sealed || a_sentry) cap_cause = C_CAP_SEALED;
         else if (!b_sealed || b_sentry || mb[M_OT +: 16] != a_ot) begin cap_cause = C_CAP_SEALED; cap_tv = b; end
+        else if (!a_perm[P_CINVOKE]) cap_cause = C_CAP_PERM;
+        else if (!b_perm[P_CINVOKE]) begin cap_cause = C_CAP_PERM; cap_tv = b; end
         else if (!a_perm[2]) cap_cause = C_CAP_PERM;
         else if (b_perm[2]) begin cap_cause = C_CAP_PERM; cap_tv = b; end
         else cap_fault = 1'b0;
@@ -442,6 +444,7 @@ module tx_core #(
     if (a_sealed) mem_cause = C_CAP_SEALED;
     else if (a_tag && !need_p) mem_cause = C_CAP_PERM;
     else if (a_tag && is_csc && b_tag && !a_perm[4]) mem_cause = C_CAP_PERM;   // STORE_CAP
+    else if (a_tag && is_csc && b_tag && !b_perm[P_GLOBAL] && !a_perm[P_STORE_LOCAL]) mem_cause = C_CAP_PERM; // local cap
     else if (a_tag && (ea < a_base || ea_end > a_top)) mem_cause = C_CAP_BOUNDS;
     else if (misalign) mem_cause = C_ALIGN;
     else if (!in_ram && !in_mmio) mem_cause = C_ACCESS;
@@ -527,9 +530,10 @@ module tx_core #(
   wire [127:0] mmio_word = (exmem_ea[127:4] == MMIO_MTIME[127:4]) ? mtime_q :
                            (exmem_ea[127:4] == MMIO_MTIMECMP[127:4]) ? mtimecmp_q : '0;
   wire [127:0] ld_raw = (exmem_mmio ? mmio_word : dmem_rdata) >> mshift;
-  // clc through a read-only (no STORE) authority: an unsealed loaded capability loses STORE and STORE_CAP
+  // clc through an authority without LOAD_MUTABLE (v4; v3 used STORE): an unsealed loaded capability
+  // loses STORE, STORE_CAP, STORE_LOCAL and LOAD_MUTABLE (deeply immutable)
   wire          clc_ro   = exmem_ldro & (dmem_rmeta[M_OT +: 16] == 16'd0);
-  wire [MW-1:0] clc_meta = clc_ro ? (dmem_rmeta & ~(MW'(7'b0010010) << M_PERM)) : dmem_rmeta;
+  wire [MW-1:0] clc_meta = clc_ro ? (dmem_rmeta & ~(MW'(PERM_LM_STRIP) << M_PERM)) : dmem_rmeta;
   logic [127:0] st_mask;
   always_comb
     case (exmem_op)
@@ -655,7 +659,7 @@ module tx_core #(
         exmem_clc   <= is_clc;
         exmem_csc   <= is_csc;
         exmem_ldcap <= ~a_tag | a_perm[3];               // LOAD_CAP (or unchecked base)
-        exmem_ldro  <= a_tag & ~a_perm[1];               // read-only authority: clc result loses STORE/STORE_CAP
+        exmem_ldro  <= a_tag & ~a_perm[P_LM];            // no LOAD_MUTABLE: clc result loses the store perms + LM
         exmem_trap0  <= ex_trap;
         exmem_cause0 <= ex_cause;
         exmem_tval0  <= ex_tval;

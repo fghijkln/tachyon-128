@@ -63,8 +63,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest", "perm4"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3])[0]
         if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user", "bpat", "call", "nest"):
             k = "alu"
         if k == "alu":
@@ -237,11 +237,35 @@ class Gen:
             self.out.append(f"{Le}:")
             self.emit("cjalr r0, r56")
             self.out.append(f"{La}:")
+        elif k == "perm4":          # v4 GLOBAL / LOAD_MUTABLE / STORE_LOCAL: derive a data cap with chosen perms
+            mask = r.choice([0x77F, 0x6FF, 0x3FF, 0x37F, 0x5FF, 0x7FF, 0x59B, 0x41B, 0x19B, r.getrandbits(11)])
+            self.emit(f"li r57, {mask}")
+            self.emit("candperm r58, r60, r57")
+            off = r.randrange(0, 1024, 16)
+            c = r.random()
+            # inside PCC-bounded regions any instruction (the candperm too) may be skipped by a fetch fault,
+            # leaving a stale untagged r58: never store through r58 there (it could hit code)
+            sb = 58 if allow_ctrl else 60
+            if c < 0.35:            # store the (possibly local) cap through r60 / itself / an untagged pointer
+                self.emit(f"csc r58, {off}(r{r.choice([60, sb, 3])})")
+            elif c < 0.6:           # store any register through it
+                self.emit(f"csc r{self.src()}, {off}(r{sb})")
+            elif c < 0.9:           # load through it (LOAD_MUTABLE attenuation), maybe follow the loaded cap
+                d = self.dst()
+                self.emit(f"clc r{d}, {off}(r58)")
+                if d and r.random() < 0.5:
+                    self.emit(f"cgetperm r{self.dst()}, r{d}")
+                    self.emit(f"clc r{self.dst()}, {r.randrange(0, 64, 16)}(r{d})")
+            else:
+                self.emit(f"cgetperm r{self.dst()}, r58")
         elif k == "cinvoke":        # CInvoke-style domain call: sealed code + data pair, return sentry
             Lp, Lr, Lt, Le, La = (self.label() for _ in range(5))
             self.emit(f"la r57, {Lt}")
             self.emit("csetaddr r57, rc, r57")
             self.emit(f"csetbndi r57, r57, {Le} - {Lt} + 4")
+            if r.random() < 0.12:
+                self.emit("addi r59, r0, 0x5FF")                          # v4: code without PERMIT_CINVOKE
+                self.emit("candperm r57, r57, r59")
             c = r.random()
             self.emit(f"cseal r57, r57, r{55 if c > 0.05 else 63}")        # sealed code (root: bad otype)
             if c < 0.1:

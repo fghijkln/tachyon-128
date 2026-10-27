@@ -40,6 +40,14 @@ def check_defs():
         m = re.search(r"MMIO_%s = \{112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF, 16'h([0-9A-F]+)\}" % name, sv)
         assert getattr(isa, "MMIO_" + name) == isa.MMIO_BASE + int(m.group(1), 16), name
     n += len(cf) + 3
+    # v4 permission layout
+    assert int(re.search(r"localparam int PW = (\d+);", sv).group(1)) == isa.PERM_BITS
+    assert int(re.search(r"PERM_ALL = 11'h([0-9A-F]+);", sv).group(1), 16) == isa.PERM_ALL
+    assert int(re.search(r"PERM_LM_STRIP = 11'h([0-9A-F]+);", sv).group(1), 16) == isa.PERM_LM_STRIP
+    pb = dict(re.findall(r"P_(GLOBAL|LM|CINVOKE|STORE_LOCAL) = (\d+)", sv))
+    assert 1 << int(pb["GLOBAL"]) == isa.PERM_GLOBAL and 1 << int(pb["LM"]) == isa.PERM_LOAD_MUTABLE
+    assert 1 << int(pb["CINVOKE"]) == isa.PERM_CINVOKE and 1 << int(pb["STORE_LOCAL"]) == isa.PERM_STORE_LOCAL
+    n += 7
     alu = re.findall(r"A_(\w+)\s*=\s*(\d+)", sv)
     for name, val in alu:
         assert isa.ALU_FUNCS[int(val)] == name.lower(), name

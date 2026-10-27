@@ -101,7 +101,12 @@ CAUSE_NAMES = {1: "illegal-instruction", 2: "capability-tag", 3: "capability-bou
 
 # capability permissions
 PERM_LOAD, PERM_STORE, PERM_EXEC, PERM_LOAD_CAP, PERM_STORE_CAP, PERM_SEAL, PERM_UNSEAL = 1, 2, 4, 8, 16, 32, 64
-PERM_ALL = 0x7F
+# v4: CHERI-style GLOBAL (clear = local capability), LOAD_MUTABLE, PERMIT_CINVOKE, STORE_LOCAL
+PERM_GLOBAL, PERM_LOAD_MUTABLE, PERM_CINVOKE, PERM_STORE_LOCAL = 0x80, 0x100, 0x200, 0x400
+PERM_BITS = 11
+PERM_ALL = 0x7FF
+# clc through an authority without LOAD_MUTABLE removes these from an unsealed loaded capability
+PERM_LM_STRIP = PERM_STORE | PERM_STORE_CAP | PERM_STORE_LOCAL | PERM_LOAD_MUTABLE
 OTYPE_MAX = 0xFFFE           # otype 0 = unsealed; cseal can use otypes 1..0xFFFE
 OTYPE_SENTRY = 0xFFFF        # reserved otype of sealed entry capabilities (csealentry, sentry links)
 NULL_META = (0, 0, 0, 0)     # (perm, base, top, otype)

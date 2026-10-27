@@ -69,9 +69,10 @@ def expect_program(name):
             v = 0x1000000000000000000000001
             if "nodes walked        = 6\n" not in out or f"payload sum         = {21 * v:032x}" not in out \
                     or "nodes after forge   = 3\n" not in out or f"{15 * v:032x}" not in out \
-                    or "nodes via read-only = 3\n" not in out or "faults caught = 3\n" not in out \
+                    or "nodes via read-only = 3\n" not in out or "faults caught = 4\n" not in out \
+                    or "local cap reloaded from stack, tag = 1\n" not in out \
                     or [l for l in out.splitlines() if "trap cause" in l] != \
-                    ["  !! trap cause=2", "  !! trap cause=3", "  !! trap cause=4"]:
+                    ["  !! trap cause=2", "  !! trap cause=3", "  !! trap cause=4", "  !! trap cause=4"]:
                 return "caplist behaviour wrong"
         if name == "timer":
             ticks = sum(1 for l in m.trace if l.startswith("I 1 "))

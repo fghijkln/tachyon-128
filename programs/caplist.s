@@ -3,6 +3,7 @@
 # 32-byte capability: [0] next (capability granule), [16] 128-bit payload.
 # Then: an integer overwrite of a next-pointer clears the granule's tag (the list is cut,
 # the forged pointer is unusable as a capability), and bounds/permissions still hold.
+# v4: a local (non-GLOBAL) stack capability can be spilled to the stack but not into the heap.
         .org 0
 _start: li   sp, 0x40000
         j    main
@@ -41,11 +42,11 @@ walk_d: ret
 main:   la   t0, handler
         csrw tvec, t0
         li   s9, 0
-        # heap capability: [heap, heap+512), LOAD|STORE|LOAD_CAP|STORE_CAP
+        # heap capability: [heap, heap+512), LOAD|STORE|LOAD_CAP|STORE_CAP|GLOBAL|LOAD_MUTABLE
         la   t1, heap
         csetaddr s0, rc, t1
         csetbndi s0, s0, 512
-        li   t2, 0x1B
+        li   t2, 0x19B
         candperm s0, s0, t2
         # root slot (one granule) that holds the list head
         la   t1, slot
@@ -121,6 +122,22 @@ build:  slli t3, s3, 5              # node i at heap + 32*i
         call walk
         mv   s8, a0
         csc  s2, 0(t4)              # fault 3: capability-permission (no STORE)
+        # v4: a local (non-GLOBAL) capability, e.g. one for the stack, can only be stored through an
+        # authority with STORE_LOCAL: the stack capability has it, the heap node capabilities do not
+        addi t1, sp, -64
+        csetaddr t5, rc, t1
+        csetbndi t5, t5, 64
+        li   t3, 0x51B              # LOAD|STORE|LOAD_CAP|STORE_CAP|LOAD_MUTABLE|STORE_LOCAL, not GLOBAL
+        candperm t5, t5, t3
+        csc  t5, 0(t5)              # spill into its own stack region: allowed
+        clc  t6, 0(t5)
+        clc  t0, 0(s1)              # head node capability (no STORE_LOCAL)
+        csc  t5, 0(t0)              # fault 4: capability-permission (local capability into the heap)
+        la   a0, m_loc
+        call puts
+        cgettag a0, t6
+        call putu
+        call putnl
         la   a0, m_ro
         call puts
         mv   a0, s8
@@ -140,6 +157,7 @@ m_len:  .asciz "head node cap length = "
 m_f:    .asciz "nodes after forge   = "
 m_ro:   .asciz "nodes via read-only = "
 t_msg:  .asciz "  !! trap cause="
+m_loc:  .asciz "local cap reloaded from stack, tag = "
 m_fc:   .asciz "faults caught = "
         .align 16
 slot:   .space 16

@@ -917,7 +917,7 @@ f2:     addi r20, r20, 1
         li r7, 64
         csetaddr r11, rc, r5
         csetbnd r11, r11, r7
-        li r7, 0x1B              # data: LOAD|STORE|LOAD_CAP|STORE_CAP, no EXEC
+        li r7, 0x21B             # data: LOAD|STORE|LOAD_CAP|STORE_CAP|PERMIT_CINVOKE, no EXEC
         candperm r11, r11, r7
         li r7, 0x60
         candperm r12, rc, r7
@@ -969,7 +969,7 @@ mend:   cjalr r0, r1             # return through the caller's sentry
         csetaddr r10, rc, r5
         csetbnd r10, r10, r6     # RW data cap (all perms)
         csc r10, 0(r5)           # spill it
-        li r7, 9                 # LOAD | LOAD_CAP: read-only view that may load capabilities
+        li r7, 9                 # LOAD | LOAD_CAP: read-only view that may load capabilities (no LOAD_MUTABLE)
         candperm r11, r10, r7
         clc r12, 0(r11)          # loaded through a read-only view
         cgetperm r13, r12        # STORE and STORE_CAP gone
@@ -1003,6 +1003,125 @@ mend:   cjalr r0, r1             # return through the caller's sentry
         candperm r32, r31, r7
         cgetperm r33, r32
 """ + POST + handler + DATA
+    # ---------------- v4: GLOBAL / STORE_LOCAL, LOAD_MUTABLE, PERMIT_CINVOKE
+    T["perm_local"] = PRE + setup + """
+        li r6, 64
+        csetaddr r10, rc, r5
+        csetbnd r10, r10, r6     # all permissions: GLOBAL and STORE_LOCAL
+        li r7, 0x77F             # everything but GLOBAL
+        candperm r11, r10, r7    # a local capability
+        li r8, 0x3FF             # everything but STORE_LOCAL
+        candperm r12, r10, r8    # global authority without STORE_LOCAL
+        csc r10, 0(r12)          # global cap through it: fine
+        csc r11, 16(r12)         # local cap -> cap-permission (tval = ea)
+        csc r11, 16(r10)         # authority with STORE_LOCAL: fine
+        csc r11, 32(r5)          # untagged (hybrid) base: unchecked, fine
+        clc r13, 16(r10)         # the local cap round-trips and stays local
+        cgetperm r14, r13
+        cgetperm r15, r11
+        li r9, 0x60
+        candperm r16, rc, r9
+        li r9, 9
+        csetaddr r16, r16, r9
+        cseal r17, r11, r16      # sealing does not make it global
+        csc r17, 48(r12)         # -> cap-permission
+        csc r17, 48(r10)         # fine
+        csc r6, 0(r12)           # untagged value: no local rule
+        candperm r18, r10, r7
+        csc r18, 0(r12)          # local cap produced by the previous instruction (forwarded) -> cap-permission
+        li r9, 0x37F             # neither GLOBAL nor STORE_LOCAL
+        candperm r19, r10, r9
+        csc r19, 0(r19)          # a local cap cannot even store itself without STORE_LOCAL
+        candperm r20, r10, r7    # local but with STORE_LOCAL
+        csc r20, 0(r20)          # fine
+        li r9, 0x7EF             # no STORE_CAP: that check comes first
+        candperm r21, r10, r9
+        csc r11, 0(r21)          # -> cap-permission (STORE_CAP)
+        clc r22, 0(r10)
+        cgetperm r23, r22
+        sq r6, 16(r12)           # plain store through the authority clears the local cap's tag
+        clc r24, 16(r10)
+        cgettag r25, r24
+""" + POST + handler + DATA
+    T["perm_load_mutable"] = PRE + setup + """
+        li r6, 64
+        csetaddr r10, rc, r5
+        csetbnd r10, r10, r6     # all permissions
+        csc r10, 0(r5)           # granule 0: cap A (cursor = data, so A can reload itself)
+        li r7, 0x6FF             # everything but LOAD_MUTABLE (STORE kept)
+        candperm r11, r10, r7
+        clc r12, 0(r11)          # v4: attenuated (v3 kept STORE because the authority had it)
+        cgetperm r13, r12        # STORE, STORE_CAP, STORE_LOCAL, LOAD_MUTABLE gone
+        sq r7, 32(r12)           # -> cap-permission
+        lq r14, 16(r12)          # loads fine
+        clc r15, 0(r12)          # transitive: loaded through the attenuated cap -> attenuated again
+        cgetperm r16, r15
+        li r7, 0x109             # LOAD|LOAD_CAP|LOAD_MUTABLE, no STORE
+        candperm r17, r10, r7
+        clc r18, 0(r17)          # v4: NOT attenuated (v3 stripped STORE here)
+        cgetperm r19, r18
+        sq r7, 32(r18)           # fine: the loaded cap still has STORE
+        li r7, 0x60
+        candperm r20, rc, r7
+        li r7, 6
+        csetaddr r20, r20, r7
+        cseal r21, r10, r20
+        csc r21, 16(r5)
+        clc r22, 16(r11)         # sealed: loaded unchanged
+        cunseal r23, r22, r20
+        cgetperm r24, r23
+        clc r25, 0(r11)
+        csc r10, 48(r25)         # load-use of an attenuated cap -> cap-permission
+        clc r26, 0(r5)           # hybrid base: unchanged
+        cgetperm r27, r26
+        li r7, 0x7F7             # no LOAD_CAP: tag stripped (LOAD_CAP rule first)
+        candperm r28, r10, r7
+        clc r29, 0(r28)
+        cgettag r30, r29
+""" + POST + handler + DATA
+    T["perm_cinvoke"] = PRE + setup + """
+        la r6, meth
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, mend2 - meth + 4
+        li r7, 64
+        csetaddr r11, rc, r5
+        csetbnd r11, r11, r7
+        li r7, 0x21B
+        candperm r11, r11, r7    # data with PERMIT_CINVOKE
+        li r7, 0x5FF
+        candperm r12, r10, r7    # code without PERMIT_CINVOKE
+        li r7, 0x01B
+        candperm r13, r11, r7    # data without PERMIT_CINVOKE
+        li r7, 0x60
+        candperm r14, rc, r7
+        li r7, 99
+        csetaddr r14, r14, r7
+        cseal r15, r10, r14      # good code
+        cseal r16, r11, r14      # good data
+        cseal r17, r12, r14      # code, no PERMIT_CINVOKE
+        cseal r18, r13, r14      # data, no PERMIT_CINVOKE
+        cinvoke r20, r17, r16    # -> cap-permission, tval = code cursor
+        cinvoke r20, r15, r18    # -> cap-permission, tval = data cursor
+        cinvoke r20, r17, r18    # both missing: code reported first
+        li r7, 64
+        csetaddr r19, rc, r5
+        csetbnd r19, r19, r7
+        li r7, 0x3FF             # data with PERMIT_CINVOKE and EXEC
+        candperm r19, r19, r7
+        cseal r19, r19, r14
+        cinvoke r20, r17, r19    # PERMIT_CINVOKE check comes before the EXEC checks
+        cinvoke r20, r15, r19    # -> cap-permission (data has EXEC)
+pc1:    cgetpcc r9
+        cincaddri r9, r9, rt1 - pc1
+        csealentry r1, r9
+        cinvoke r20, r15, r16    # succeeds
+rt1:    cgetperm r21, r20
+        halt zero
+meth:   lq r32, 0(r20)
+        addi r32, r32, 3
+        sq r32, 0(r20)
+mend2:  cjalr r0, r1
+""" + handler + DATA
     # ---------------- v3: user / supervisor privilege
     phandler = """
 phandler: csrr r50, cause

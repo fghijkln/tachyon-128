@@ -20,6 +20,7 @@
      **v2 密封能力**：`cseal`/`cunseal` 用带 SEAL/UNSEAL 权限的授权能力（其游标即 otype）密封/解封；密封后的能力不能解引用、不能修改、不能跳转。
      **v3 密封入口（sentry）与 `cinvoke`**：`csealentry` 生成只能被 `cjalr` 跳入的入口能力（跳转时原子解封进 PCC，返回链接也是 sentry）；`cinvoke` 用同 otype 密封的“代码+数据”能力对进入保护域，原子地解封代码到 PCC、解封数据到 rd。
      **v3 `clc` 权限衰减**：通过不带 STORE 权限的能力 `clc` 读出的（未密封）能力自动去掉 STORE/STORE_CAP——只读视图传递为深度只读。
+     **v4 新权限位**：GLOBAL（无此位即“局部能力”）、LOAD_MUTABLE（`clc` 衰减改由它决定，取代 v3 的 STORE 规则）、PERMIT_CINVOKE（`cinvoke` 的代码与数据都必须具有）、STORE_LOCAL（只有带此权限的能力才能 `csc` 存入局部能力，例如栈指针不能被存进堆里）。
   2. **寄存器内 SIMD 通道**：一个 128 位寄存器可视为 16×8 / 8×16 / 4×32 / 2×64 位通道，支持加减、饱和加减、min/max、比较掩码、乘法、广播、横向求和、通道移位。
   3. **宽立即数 / 常量拼接**：`wli`/`wins` 把 16 位立即数放到 8 个槽位中任意一个，汇编器的 `li` 伪指令自动选出最短序列。
 - **v3 两级特权（supervisor/user）**：`status.U/PU` 位，`eret` 才能进入用户态；用户态执行 CSR 读写、`eret`、`halt`、`csetepcc` 触发特权违例（cause 9）；用户态用非能力（无 tag）指针访存必须落在 `[ubase, ubound)` 窗口内，否则特权违例——MMIO 只能通过内核授予的能力访问；`ecall`（cause 8）陷入内核。示例 `programs/kernel.s`：两个用户任务、定时器抢占、ecall 打印。
@@ -72,11 +73,11 @@
 | r44–r62 | — | general |
 | r63 | `rc` | **root capability** at reset |
 
-Each GPR is a *fat register*: `{value[127:0], tag, otype[15:0], perm[6:0], base[127:0], top[128:0]}`.
+Each GPR is a *fat register*: `{value[127:0], tag, otype[15:0], perm[10:0], base[127:0], top[128:0]}` (v3: `perm[6:0]`).
 The side-band is invisible to ordinary instructions. **Invariant:** when `tag = 0` the side-band is all zero.
 
 At reset all registers read as zero and untagged, except `rc` (r63), which holds the root capability:
-`tag=1, perm=all (0x7F), otype=0 (unsealed), base=0, top=2^128, value=0`. PC = 0. All CSRs = 0. Shadow tag memory is all clear.
+`tag=1, perm=all (0x7FF, v3: 0x7F), otype=0 (unsealed), base=0, top=2^128, value=0`. PC = 0. All CSRs = 0. Shadow tag memory is all clear.
 
 ## 2. Instruction formats
 
@@ -219,7 +220,8 @@ Untagged base registers perform unchecked ("hybrid mode") accesses.
 ### 5.1 Hardware capabilities (CHERI-inspired fat pointers)
 
 A *capability* is a register whose hidden tag is set. It grants access to `[base, top)` with permissions
-`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC (instruction fetch, §5.1.2), bit3 LOAD_CAP, bit4 STORE_CAP, bit5 SEAL, bit6 UNSEAL) and an object type `otype` (0 = unsealed, §5.1.3). Its value is the current address (cursor),
+`perm` (bit0 LOAD, bit1 STORE, bit2 EXEC (instruction fetch, §5.1.2), bit3 LOAD_CAP, bit4 STORE_CAP, bit5 SEAL, bit6 UNSEAL,
+**v4:** bit7 GLOBAL, bit8 LOAD_MUTABLE, bit9 PERMIT_CINVOKE, bit10 STORE_LOCAL — §5.1.6) and an object type `otype` (0 = unsealed, §5.1.3). Its value is the current address (cursor),
 a full 128-bit address — bounds are stored at full precision in the side-band, so no address bits are
 sacrificed to compression, and a cursor may move out of bounds without losing the tag (it simply cannot
 be dereferenced there).
@@ -238,7 +240,7 @@ tag. Tags therefore descend only from the root capability in `rc` at reset.
 | 0 | `csetaddr rd, rs1, rs2` | rd = rs1 with cursor := rs2.value (tag/bounds kept) |
 | 1 | `cincaddr rd, rs1, rs2` | rd = rs1 with cursor += rs2.value |
 | 2 | `csetbnd rd, rs1, rs2` | requires rs1 tagged (else *cap-tag*); new = [rs1.cursor, rs1.cursor + rs2) must lie within rs1's bounds (else *cap-bounds*); rd = tagged, same perms, base = cursor = rs1.cursor |
-| 3 | `candperm rd, rs1, rs2` | perm := perm & rs2[6:0] (untagged rs1 → untagged result) |
+| 3 | `candperm rd, rs1, rs2` | perm := perm & rs2[10:0] (untagged rs1 → untagged result) |
 | 4 | `cgetbase rd, rs1` | base (0 if untagged) |
 | 5 | `cgetlen rd, rs1` | top − base, saturated to 2^128−1 |
 | 6 | `cgetperm rd, rs1` | perm |
@@ -369,16 +371,18 @@ one exception: **`cjalr` accepts it** and atomically unseals it into the PCC:
 | 1 | rs1 untagged / rs2 untagged | *cap-tag* (rs1 / rs2 cursor) |
 | 2 | rs1 unsealed or a sentry | *cap-sealed* (rs1) |
 | 3 | rs2 unsealed or a sentry, or `rs2.otype ≠ rs1.otype` | *cap-sealed* (rs2) |
-| 4 | rs1 lacks EXEC | *cap-perm* (rs1) |
-| 5 | rs2 has EXEC | *cap-perm* (rs2) |
+| 4 | **v4:** rs1 lacks PERMIT_CINVOKE / rs2 lacks PERMIT_CINVOKE | *cap-perm* (rs1 / rs2) |
+| 5 | rs1 lacks EXEC | *cap-perm* (rs1) |
+| 6 | rs2 has EXEC | *cap-perm* (rs2) |
 
 Effect, atomically: `pc ← rs1.cursor & ~3`, **PCC ← rs1 unsealed**, **rd ← rs2 unsealed** (the domain's data
 capability, now usable by the domain's code only). No link is written: the caller passes a return capability,
 typically a sentry built with `cgetpcc` + `cincaddri` + `csealentry`, in an argument register and the callee returns
 with `cjalr zero, ra`. Neither half of the pair is usable by the caller: the code cannot be jumped to with `cjalr`
 (not a sentry) and the data cannot be dereferenced, so the only way in is through `cinvoke`, which only unseals the
-data while transferring control to the matching code. (CHERI's `PERMIT_CINVOKE` permission is not modelled: the
-otype match plus the EXEC/non-EXEC split is the whole check.)
+data while transferring control to the matching code. **v4:** both halves must also carry **PERMIT_CINVOKE**
+(bit 9), as in CHERI: a domain owner can seal capabilities that may be passed around and unsealed by `cunseal` but
+never used as a `cinvoke` pair (clear the bit before sealing). v3 had no such bit (otype match + EXEC split only).
 
 ```
 cgetpcc    t0                 # return sentry
@@ -388,24 +392,46 @@ cinvoke    a0, s1, s2         # s1/s2 = sealed (code, data) of a counter object;
 ret: ...
 ```
 
-### 5.1.5 `clc` permission attenuation (v3): deep read-only
+### 5.1.5 `clc` permission attenuation: deep immutability via LOAD_MUTABLE (v4; v3 used STORE)
 
-A capability loaded with `clc` through a tagged authority that **lacks STORE** has STORE and STORE_CAP removed
-(`perm &= ~0x12`) if it is unsealed. Sealed capabilities (including sentries) are loaded unchanged: they are opaque,
-and their owner unseals them with full rights. Untagged (hybrid) bases load capabilities unchanged. Together with the
-existing LOAD_CAP rule (no LOAD_CAP → tag stripped), the `clc` result is:
+A capability loaded with `clc` through a tagged authority that **lacks LOAD_MUTABLE** (bit 8) has STORE, STORE_CAP,
+STORE_LOCAL and LOAD_MUTABLE removed (`perm &= ~0x512`) if it is unsealed. Because LOAD_MUTABLE itself is removed,
+everything reached through the loaded capability is attenuated in turn: an immutable view of a data structure gives
+immutable views of everything reachable from it, transitively. Sealed capabilities (including sentries) are loaded
+unchanged: they are opaque, and their owner unseals them with full rights. Untagged (hybrid) bases load capabilities
+unchanged. Together with the LOAD_CAP rule (no LOAD_CAP → tag stripped), the `clc` result is:
 
 | authority (rs1) | granule tagged | result |
 |---|---|---|
 | untagged | yes | shadow capability, unchanged |
 | tagged, no LOAD_CAP | yes | value only, **untagged** |
-| tagged, LOAD_CAP, STORE | yes | shadow capability, unchanged |
-| tagged, LOAD_CAP, no STORE | yes | unsealed: perms minus STORE/STORE_CAP; sealed: unchanged |
+| tagged, LOAD_CAP, LOAD_MUTABLE | yes | shadow capability, unchanged |
+| tagged, LOAD_CAP, no LOAD_MUTABLE | yes | unsealed: perms minus STORE/STORE_CAP/STORE_LOCAL/LOAD_MUTABLE; sealed: unchanged |
 | any | no | value only, untagged |
 
-This is CHERI's "load-mutable" rule with STORE itself acting as the LM bit: a read-only view of a data structure
-gives read-only views of everything reachable from it, transitively, without a separate permission bit. The shadow
-memory itself is not modified.
+**Change from v3:** v3 had no LOAD_MUTABLE bit and let STORE play its role (no STORE → strip STORE/STORE_CAP). v4
+decouples the two, as CHERI does: an authority may be read-only for data yet hand out mutable capabilities (LOAD_MUTABLE
+without STORE), or writable itself yet hand out only immutable ones (STORE without LOAD_MUTABLE). A v3 read-only view
+built with `candperm` (e.g. mask 0x09) has no LOAD_MUTABLE either, so it still attenuates exactly as before.
+
+### 5.1.6 Local capabilities (v4): GLOBAL and STORE_LOCAL
+
+A tagged capability **without GLOBAL** (bit 7) is *local*. Local capabilities behave like any other capability except
+where they may be stored in memory:
+
+* `csc rA, imm(rs1)` with `rA` tagged and local, through a **tagged** `rs1` that lacks **STORE_LOCAL** (bit 10) →
+  *capability-permission* (`tval = ea`). The check comes after the STORE and STORE_CAP checks and before bounds:
+  (1) no STORE, (2) tagged `rA` and no STORE_CAP, (3) local `rA` and no STORE_LOCAL, (4) bounds, (5) alignment, (6) RAM/MMIO.
+* Sealing does not change locality (a sealed local capability is still local). Untagged `rA` values are never local.
+* An **untagged (hybrid) base** is unchecked, exactly as for every other capability rule; user mode's hybrid accesses are
+  confined to `[ubase, ubound)` anyway (§6.2).
+* GLOBAL and STORE_LOCAL are otherwise ordinary permissions: inherited by derivation, removable by `candperm`, kept in
+  shadow memory. The root capability has both.
+
+Typical use: the kernel hands a task a *local* stack capability with STORE_LOCAL (so the task can spill it and other
+local capabilities to its own stack) and only *global* capabilities without STORE_LOCAL for heap or shared memory. A
+pointer to the stack can then never be stored into the heap or a shared buffer and outlive the call (CHERI's rule for
+stack-derived capabilities), without any per-store address-range check. `programs/caplist.s` shows both cases.
 
 ### 5.2 SIMD lanes inside a GPR
 
@@ -440,7 +466,7 @@ slots; or `addi rd, zero, -1 / low14` followed by `wins` for the slots that diff
 | 1 | illegal-instruction | undefined opcode/func, `vmul.d`, CSR number ≥ 8, the zero word (`tval` = instruction word) |
 | 2 | capability-tag | `csetbnd(i)`, `cjalr`, `csetepcc`, `cseal`, `cunseal` on an untagged register |
 | 3 | capability-bounds | out-of-bounds access through a capability; non-monotonic `csetbnd(i)` |
-| 4 | capability-permission | load/store through a capability lacking LOAD/STORE; `csc` of a tagged value through a capability lacking STORE_CAP |
+| 4 | capability-permission | load/store through a capability lacking LOAD/STORE; `csc` of a tagged value through a capability lacking STORE_CAP, **v4:** of a local value through one lacking STORE_LOCAL; `cinvoke` without PERMIT_CINVOKE |
 | 5 | misaligned | access not naturally aligned |
 | 6 | access-fault | data access outside RAM and MMIO; instruction fetch outside RAM (`tval` = pc) |
 | 7 | capability-sealed | use or modification of a sealed capability; `cseal` of a sealed one; `cunseal` of an unsealed one, a sentry, or with the wrong otype; `cjalr` through a non-sentry sealed capability; `cinvoke` operand checks (§5.1.4) |
@@ -536,7 +562,8 @@ label:  op operands      # comment   (';' also starts a comment)
 
 ## 9. Known limitations (deliberate)
 
-* No global/local permission, no separate LOAD_MUTABLE / PERMIT_CINVOKE bits (STORE plays the LM role, §5.1.5).
+* v4 has GLOBAL / STORE_LOCAL / LOAD_MUTABLE / PERMIT_CINVOKE (§5.1.5, §5.1.6), but no CHERI LOAD_GLOBAL
+  (capabilities loaded through any authority keep their GLOBAL bit) and no PERMIT_SET_CID / compartment IDs.
 * Two privilege levels only; no per-mode CSR views (user mode cannot read any CSR); EPCC is write-only
   (`csetepcc`), so a kernel tracks each task's PCC itself; `rc` is the only root of authority after reset.
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.

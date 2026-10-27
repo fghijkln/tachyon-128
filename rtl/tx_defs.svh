@@ -37,11 +37,14 @@ localparam logic [127:0] MMIO_MTIMECMP = {112'hFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFF
 localparam logic [3:0] IRQ_TIMER = 4'd1;
 
 // metadata packing: {tag, otype[15:0], perm[PW-1:0], base[127:0], top[128:0]}
-//   perm bits: 0 LOAD, 1 STORE, 2 EXEC, 3 LOAD_CAP, 4 STORE_CAP, 5 SEAL, 6 UNSEAL; otype 0 = unsealed
-localparam int PW = 7;
+//   perm bits: 0 LOAD, 1 STORE, 2 EXEC, 3 LOAD_CAP, 4 STORE_CAP, 5 SEAL, 6 UNSEAL,
+//              v4: 7 GLOBAL, 8 LOAD_MUTABLE, 9 PERMIT_CINVOKE, 10 STORE_LOCAL; otype 0 = unsealed
+localparam int PW = 11;
+localparam int P_GLOBAL = 7, P_LM = 8, P_CINVOKE = 9, P_STORE_LOCAL = 10;
+localparam logic [PW-1:0] PERM_LM_STRIP = 11'h512;   // STORE | STORE_CAP | LOAD_MUTABLE | STORE_LOCAL
 localparam int MW = 1 + 16 + PW + 128 + 129;
 localparam int M_TAG = MW - 1;          // tag bit
 localparam int M_PERM = 257;            // perm  = meta[M_PERM +: PW]
 localparam int M_OT = M_PERM + PW;      // otype = meta[M_OT +: 16]
-localparam logic [PW-1:0] PERM_ALL = 7'h7F;
+localparam logic [PW-1:0] PERM_ALL = 11'h7FF;
 localparam logic [MW-1:0] ROOT_META = {1'b1, 16'd0, PERM_ALL, 128'd0, 1'b1, 128'd0};
