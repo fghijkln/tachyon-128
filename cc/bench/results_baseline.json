@@ -1,0 +1,74 @@
+[
+ {
+  "name": "coremark_lite",
+  "opt": "-O",
+  "size": 8144,
+  "retired": 377907,
+  "ok": true,
+  "out": "coremark-lite crc = 0xee93",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 488738,
+  "cpi": 1.293
+ },
+ {
+  "name": "dhrystone",
+  "opt": "-O",
+  "size": 15840,
+  "retired": 357578,
+  "ok": true,
+  "out": "Int_Glob=5 Bool_Glob=1 Ch_1=A Ch_2=B Arr_1[8]=7 Arr_2[8][7]=410\nPtr_Glob: 0 2 17 DHRYSTONE PROGRAM, SOME STRING\nInt_1=5 Int_2=13 Int_3=7 Enum=1 Str_2=DHRYSTONE PROGRAM, 2'ND STRING\nruns=400",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 437943,
+  "cpi": 1.225
+ },
+ {
+  "name": "fib",
+  "opt": "-O",
+  "size": 2896,
+  "retired": 515285,
+  "ok": true,
+  "out": "fib(20) = 6765",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 537844,
+  "cpi": 1.044
+ },
+ {
+  "name": "int128",
+  "opt": "-O",
+  "size": 3808,
+  "retired": 100485,
+  "ok": true,
+  "out": "34! = 295232799039604140847618609643520000000\nlcg = 42639905091746834075274079931108416329\n3rd largest 64-bit prime candidate found: 18446744073709551521",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 205758,
+  "cpi": 2.048
+ },
+ {
+  "name": "qsort",
+  "opt": "-O",
+  "size": 11456,
+  "retired": 488141,
+  "ok": true,
+  "out": "sorted=1 checksum=10715965524919300309 min=29 max=99984",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 586513,
+  "cpi": 1.202
+ },
+ {
+  "name": "sieve",
+  "opt": "-O",
+  "size": 11152,
+  "retired": 954178,
+  "ok": true,
+  "out": "1899 primes",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 999072,
+  "cpi": 1.047
+ }
+]

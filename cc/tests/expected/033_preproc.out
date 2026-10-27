@@ -1,0 +1,7 @@
+16 9 a + b 25
+new 1 17
+dbg: plain
+dbg: args 5 x
+if-arith ok
+
+---exit 0
