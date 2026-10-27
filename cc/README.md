@@ -16,7 +16,7 @@ python3 cc/tcc128.py prog.c --hex prog.hex      # 128-bit-word hex image for the
 ```
 
 Options: `-I dir`, `-D name[=value]`, `-O0` (no IR optimisation), `-mpurecap` (pure-capability code,
-see below), `--nolibc`, `--max N`
+see below; hardening opt-outs `-fno-subobject-bounds`, `-fno-sentries`), `-fno-inline`, `--nolibc`, `--max N`
 (simulator instruction limit), `--bin file`, `--hex file`. The exit status of `--run` is the
 program's `exit()` code. Errors are reported as `file:line:col: message`.
 
@@ -181,6 +181,13 @@ the trap handler prints the cause and faulting address, exit code 128 + cause):
 | 008_subobject_overflow | copy 10 bytes into an 8-byte member array (would overwrite the next field) | cause 3 |
 | 009_va_overread | `va_arg` past the arguments actually passed (9 claimed, 2 passed) | cause 3 |
 | 010_stack_exhaustion | unbounded recursion reaches the bottom of the 128 KiB stack region | cause 3 |
+| 040_sentry_ok | function pointers in locals, static tables, vtables, heap, `memcpy`, struct copies, varargs, `uintptr_t`, `qsort` — all sentries, all callable | no trap |
+| 041_sentry_offset | `(char *)fp + 4` (skip into the function body) | cause 7 (sealed) |
+| 042_sentry_deref | read the code through a function pointer cast to `unsigned *` | cause 7 |
+| 043_sentry_write | patch the code through a function pointer | cause 7 |
+| 044_sentry_forged | call a function pointer rebuilt from its integer address | cause 2 (tag) |
+| 045_sentry_data_call | call a data buffer cast to a function pointer ("shellcode") | cause 4 (no EXEC) |
+| 046_sentry_modify | `__builtin_cheri_address_set` on a sentry stored in a struct | cause 7 |
 
 Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** — all 86 normal C tests pass
 unmodified in purecap mode (none excluded) plus the 7 fault tests; every purecap test also matches the
@@ -230,6 +237,15 @@ used by the test scripts). Exact rules: [`ABI.md`](ABI.md) §8.1.
   the caller's frame. Tests: `purecap/009_va_overread`, `purecap/010_stack_exhaustion`.
   Per-frame narrowing of `sp` itself is deliberately not done (every escaping stack pointer is
   already bounded to its object; see `ABI.md` §8.1).
+* **Function-pointer sentries** (`-fno-sentries` / `TCC128_NO_SENTRY=1`): every function pointer —
+  `&f`, a function name decaying to a pointer, static initialisers and vtable-style tables (rebuilt by crt0
+  from the user code capability, not the supervisor root) — is a sealed entry capability made with
+  `csealentry`; indirect calls are `cjalr ra, fp`, which unseals it into the PCC. A sentry can be copied
+  (`cmove`, now a real instruction), stored, `memcpy`'d, compared and called, but not offset, retargeted,
+  re-bounded, read or written through (cause 7); calling a pointer rebuilt from an integer traps with cause 2,
+  calling a data pointer with cause 4. `__builtin_cheri_type_get(p)` returns the otype (`0xFFFF` = sentry).
+  Sentries keep the whole-image PCC bounds (direct `jal` calls need them); returns stay `ret`. Tests:
+  `purecap/040_sentry_ok` (legitimate uses, no trap) and `041`–`046` below.
 
 ## Limitations
 

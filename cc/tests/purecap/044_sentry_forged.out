@@ -1,0 +1,5 @@
+add(1, 1) = 2; forged tag 0, calling <A>
+
+*** capability trap (hardware): cause=2 <A>
+
+---exit 130

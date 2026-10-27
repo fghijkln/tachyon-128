@@ -142,17 +142,19 @@ a tagged capability and every memory access goes through one:
   capability of exactly `n` bytes (`realloc`/`free` re-derive the header from the allocator's own
   capability); jump tables are read through a capability bounded to the table. Initialised pointer
   slots in static data (`const char *words[] = {...}`) are rebuilt at start-up from the linker's
-  `__cap_relocs` table `{slot, target, size, addend}` (size −1 = function, derived from the PCC).
+  `__cap_relocs` table `{slot, target, size, addend}` (size −1 = function, derived from the user code
+  capability and sealed as a sentry, §8.1).
 * **Code generation**: pointer arithmetic is `cincaddr`/`cincaddri` (keeps the tag; integer `add`
   would clear it); every 16-byte load/store is `clc`/`csc` so pointers, `uintptr_t` and struct copies
   keep their tags (word-aligned `memcpy`/`qsort` swaps move whole 16-byte granules); register moves are
-  `cmove`; function pointers come from `cgetpcc` + `csetaddr`.
+  `cmove` (v6: a real instruction that copies sealed capabilities too); function pointers come from
+  `cgetpcc` + `csetaddr` and are sealed as sentries (§8.1); indirect calls are `cjalr ra, fp`.
 * **Intrinsics** (also accepted, as no-ops/plain values, in the default mode):
   `__builtin_cheri_bounds_set(p, n)`, `address_set(p, a)`, `perms_and(p, m)`, `tag_get(p)`,
   `length_get(p)`, `base_get(p)`, `perms_get(p)`.
 * **Faults**: `tvec = __tx_trap` prints `*** capability trap (hardware): cause=N <tval>` and exits
   with `128 + cause` (3 = bounds, 4 = permission, 9 = untagged access in user mode).
-* **Hardening** (v6, §8.1): sub-object bounds, bounded stack region, va_list bounds.
+* **Hardening** (v6, §8.1): sub-object bounds, bounded stack region, va_list bounds, function-pointer sentries.
 
 ### 8.1 Purecap hardening (v6)
 
@@ -188,3 +190,29 @@ traps; code that needs it is compiled with `-fno-subobject-bounds`.
   `sret` buffers, va_list) already carries the exact bounds of its object, so narrowing `sp` itself
   would only guard the compiler's own fixed-offset accesses, at the price of saving/restoring `sp`
   around every call (CHERI-RISC-V purecap ABIs likewise bound the stack region, not each frame).
+
+**Function-pointer sentries** (default; `-fno-sentries` / `TCC128_NO_SENTRY=1` turns it off). Every C function
+pointer is a *sealed entry capability* (`SPEC.md` §5.1.4, otype `0xFFFF`):
+
+* **Creation.** Taking a function's address (`&f`, or `f` decaying to a pointer, including arguments such as
+  `qsort(..., cmp)`) is `cgetpcc` → `csetaddr` → `csealentry`. Static initialisers (`op_t ops[] = {add, sub}`,
+  vtable-style `struct { int (*area)(int); } vt[] = {...}`) are capability relocations with size −1; crt0
+  derives them from the **user code capability** `[0, __end)` with EXEC|LOAD|LOAD_CAP|GLOBAL (not from the
+  supervisor's root PCC it runs under), adds the addend and seals them with `csealentry`.
+* **Bounds and permissions.** A sentry carries the bounds and permissions of the program's PCC (the whole code
+  image), because compiled code calls other functions with PC-relative `jal`; narrowing a sentry to its own
+  function would make those calls fault at fetch. The protection comes from the seal, not from the bounds.
+* **Calls.** An indirect call is `cjalr ra, fp`: it accepts a sentry (unsealing it into the PCC) or an unsealed
+  code capability, so `ra` receives a sentry link (callees save/restore it with `csc`/`clc` like any 16-byte
+  value). Returns stay `ret` (`jalr zero, ra`, address only) because direct `jal` calls produce an untagged link;
+  the PCC does not change across a return since every function shares the one code capability.
+* **Moves.** Function pointers are copied with `cmove` (CAP func 18), which copies sealed capabilities exactly;
+  memory copies (`memcpy`, struct assignment, `qsort` swaps, varargs) use `clc`/`csc` and keep the seal too.
+  `uintptr_t` holds the sealed capability unchanged; casting to a narrower integer keeps only the address.
+* **What traps** (fault tests `041`–`046`, `040` = legitimate uses): offsetting a function pointer (`(char *)fp + 4`) or retargeting it
+  with `__builtin_cheri_address_set` / re-bounding it — modification of a sealed capability, cause 7; loading
+  or storing through it as if it were data — dereference of a sealed capability, cause 7; calling a function
+  pointer rebuilt from an integer — `cjalr` of an untagged value, cause 2; calling a data pointer cast to a
+  function pointer (e.g. "shellcode" in a buffer) — no EXEC permission, cause 4. Comparing, testing for NULL,
+  printing (`%p`) and storing function pointers work as before. `__builtin_cheri_type_get(p)` (new) returns
+  the otype (`0xFFFF` for a sentry).

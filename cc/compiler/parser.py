@@ -77,7 +77,7 @@ TYPE_KEYWORDS = {"void", "_Bool", "char", "short", "int", "long", "signed", "uns
 # __builtin_cheri_<op>(ptr[, x]): argument count, result type (None = the pointer's type)
 CHERI_BUILTINS = {"bounds_set": (2, None), "address_set": (2, None), "perms_and": (2, None),
                   "tag_get": (1, T.ULONG), "length_get": (1, T.UINT128), "base_get": (1, T.UINT128),
-                  "perms_get": (1, T.ULONG)}
+                  "perms_get": (1, T.ULONG), "type_get": (1, T.ULONG)}
 
 
 class Parser:

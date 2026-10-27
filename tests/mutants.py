@@ -100,6 +100,12 @@ MUTANTS = [
     ("divw_operands_not_extended", "tx_core.sv", "wire [127:0] md_a = md_dw ? {{96{a[31]}}, a[31:0]} : a;", "wire [127:0] md_a = a;"),
     ("mulwu_sign_extends", "tx_core.sv", "md_y[31] & (ex_fn != MD_MULWU)", "md_y[31]"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
+    # ---- v6: cmove (exact register copy, sealed capabilities included)
+    ("cmove_drops_seal", "tx_core.sv", "CF_CMOVE: begin cap_y = a; cap_m = ma; end",
+     "CF_CMOVE: begin cap_y = a; cap_m = {ma[M_TAG], 16'd0, ma[M_OT-1:0]}; end"),
+    ("cmove_clears_tag", "tx_core.sv", "CF_CMOVE: begin cap_y = a; cap_m = ma; end", "CF_CMOVE: begin cap_y = a; end"),
+    ("cmove_traps_on_sealed", "tx_core.sv", "if (cap_fn <= 5'd3 && a_sealed)", "if ((cap_fn <= 5'd3 || cap_fn == CF_CMOVE) && a_sealed)"),
+    ("cmove_decoded_illegal", "tx_defs.svh", "N_CAP = 8'd19", "N_CAP = 8'd18"),
 ]
 
 

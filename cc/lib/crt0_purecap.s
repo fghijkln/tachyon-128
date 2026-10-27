@@ -20,6 +20,12 @@ _start: li   t0, 0x40000
 # <<stack
         la   t2, __tx_trap
         csrw tvec, t2
+        cgetpcc t9                # code capability [0, __end), EXEC | LOAD | LOAD_CAP | GLOBAL: the PCC of the
+        csetaddr t9, t9, zero     # user program and the root of every function pointer
+        la   t2, __end
+        csetbnd t9, t9, t2
+        li   t2, 0x8D
+        candperm t9, t9, t2
         la   t0, __cap_relocs
         la   t1, __cap_relocs_end
         csetaddr t0, gp, t0       # the table itself is read through the RAM capability
@@ -30,15 +36,17 @@ __crl:  bgeu t0, t1, __crd
         lq   t5, 48(t0)           # addend
         addi t6, zero, -1
         bne  t4, t6, __crdata
-        cgetpcc t7
-        csetaddr t7, t7, t3
+        csetaddr t7, t9, t3       # function: from the code capability (not the supervisor's root PCC)
+        cincaddr t7, t7, t5
+        csealentry t7, t7         # SENTRY (v6): function pointers are sealed entry capabilities
         j    __crset
 __crdata:
         csetaddr t7, gp, t3
-        beqz t4, __crset
+        beqz t4, __crinc
         csetbnd t7, t7, t4
-__crset:
+__crinc:
         cincaddr t7, t7, t5
+__crset:
         csetaddr t8, gp, t2
         csc  t7, 0(t8)
         cincaddri t0, t0, 64
@@ -57,13 +65,7 @@ __crd:  li   t0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000
         # capabilities. PCC = code capability [0, __end), EXEC | LOAD | LOAD_CAP | GLOBAL.
         csrw ubase, zero
         csrw ubound, zero
-        cgetpcc t1
-        csetaddr t1, t1, zero
-        la   t2, __end
-        csetbnd t1, t1, t2
-        li   t2, 0x8D
-        candperm t1, t1, t2
-        csetepcc t1
+        csetepcc t9
         la   t0, __crt_user
         csrw epc, t0
         li   t0, 0x10             # status.PU: eret enters user mode (interrupts stay off)

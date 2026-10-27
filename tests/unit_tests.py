@@ -951,6 +951,49 @@ f2:     addi r20, r20, 1
         cjalr r0, r1
         addi r22, r22, 1         # never
 """ + handler + DATA
+    # ---------------- v6: cmove is a real instruction (exact copy, sealed capabilities and sentries too)
+    T["cmove_sealed"] = PRE + setup + """
+        la r6, f3
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, f3e - f3 + 4
+        csealentry r11, r10
+        cmove r12, r11           # copy of a sentry: still a sentry (EX->EX forwarding of the source)
+        cgettype r13, r12
+        cgettag r14, r12
+        cjalr r1, r12            # callable through the copy
+        nop
+        cmove r15, r12           # MEM->EX
+        cmove r16, r15           # chained copies
+        cjalr r1, r16
+        cincaddri r17, r16, 0    # cincaddri on a sealed copy still traps (the seal was copied)
+        li r7, 9
+        csetaddr r18, rc, r7
+        cseal r19, r5, r18       # ordinary sealed data capability (otype 9)
+        cmove r20, r19
+        cgettype r21, r20
+        cgetbase r22, r20
+        cgetlen r23, r20
+        lq r24, 0(r20)           # still sealed -> cap-sealed
+        csc r11, 32(r5)
+        clc r25, 32(r5)
+        cmove r26, r25           # load-use into cmove
+        cjalr r1, r26
+        li r27, 12345
+        cmove r28, r27           # untagged source: plain move
+        cgettag r29, r28
+        cmove r0, r11            # r0 stays zero
+        cgettag r30, r0
+        cmove r31, rc            # root copied unchanged
+        cgetperm r32, r31
+        cmove r33, r31
+        csetbndi r33, r33, 64    # an unsealed copy is an ordinary capability
+        cgetlen r34, r33
+        halt zero
+f3:     addi r40, r40, 1
+        cgettype r41, r1
+        cmove r42, r1            # the sentry link can be copied and returned through
+f3e:    cjalr r0, r42
+""" + handler + DATA
     T["cinvoke_ops"] = PRE + setup + """
         la r6, method
         csetaddr r10, rc, r6

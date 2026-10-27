@@ -142,7 +142,7 @@ class Gen:
                 last = d if d else None
         elif k == "cap":
             f = r.choice([c for c in CAP_FUNCS if c not in ("cjalr", "cinvoke")] +
-                         ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal", "csealentry"])
+                         ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal", "csealentry", "cmove", "cmove"])
             s1 = r.choice([60, 63, self.src(), self.src()])
             if f in CAP_RD_ONLY:
                 self.emit(f"{f} r{self.dst()}")
@@ -228,6 +228,8 @@ class Gen:
                 self.emit("candperm r57, r57, r56")
             elif c < 0.4:
                 self.emit("csealentry r57, r57")     # sentry call: unsealed on entry, link is a sentry
+                if r.random() < 0.4:
+                    self.emit("cmove r57, r57" if r.random() < 0.3 else f"cmove r{self.dst()}, r57")   # v6: copies keep the seal
             self.emit("cjalr r56, r0" if c > 0.93 else "cjalr r56, r57")   # untagged -> cap-tag
             self.emit(f"j {La}")
             self.out.append(f"{Lt}:")

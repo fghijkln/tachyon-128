@@ -1,0 +1,6 @@
+method(3, 4) = 7, type ffff
+retargeting the sentry at <A>
+
+*** capability trap (hardware): cause=7 <A>
+
+---exit 135

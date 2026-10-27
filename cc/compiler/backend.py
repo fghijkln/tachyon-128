@@ -277,7 +277,7 @@ STORES = {1: "sb", 2: "sh", 4: "sw", 8: "sd", 16: "sq"}
 IMM_FORM = {"add": "addi", "and": "andi", "or": "ori", "xor": "xori", "slt": "slti", "sltu": "sltiu",
             "sll": "slli", "srl": "srli", "sra": "srai",
             "addw": "addiw", "addwu": "addiwu", "sllw": "slliw", "sllwu": "slliwu", "cadd": "cincaddri", "csetbnd": "csetbndi"}
-CAP_UNARY_OPS = {"cgettag", "cgetlen", "cgetbase", "cgetperm"}
+CAP_UNARY_OPS = {"cgettag", "cgetlen", "cgetbase", "cgetperm", "cgettype"}
 PC_MEM = {"lq": "clc", "sq": "csc"}      # purecap: every 16-byte access moves the tag too
 BR = {"eq": "beq", "ne": "bne", "lt": "blt", "ge": "bge", "ltu": "bltu", "geu": "bgeu"}
 NEG = {"eq": "bne", "ne": "beq", "lt": "bge", "ge": "blt", "ltu": "bgeu", "geu": "bltu"}
@@ -304,6 +304,7 @@ class Emitter:
         self.frame = (self.frame + 15) // 16 * 16
         self.long_branches = len(code) > 6000
         self.pc = getattr(fg, "pc", False)
+        self.sentries = self.pc and getattr(fg, "sentries", True)
 
     def e(self, s):
         self.out.append("        " + s)
@@ -439,10 +440,12 @@ class Emitter:
         d, slot = self.dst(i.d)
         if not self.pc:
             self.e(f"la {rn(d)}, {i.sym}" + (f"+{i.imm}" if i.imm else ""))
-        elif i.extra == "func":       # code pointer: derived from the PCC
+        elif i.extra == "func":       # code pointer: derived from the PCC, sealed as a sentry (v6)
             self.e(f"la {rn(SCR_ADDR)}, {i.sym}")
             self.e(f"cgetpcc {rn(d)}")
             self.e(f"csetaddr {rn(d)}, {rn(d)}, {rn(SCR_ADDR)}")
+            if self.sentries:
+                self.e(f"csealentry {rn(d)}, {rn(d)}")
         else:                         # data: derived from gp (RAM capability), bounded to the object
             self.e(f"la {rn(SCR_ADDR)}, {i.sym}")
             self.e(f"csetaddr {rn(d)}, gp, {rn(SCR_ADDR)}")
@@ -543,7 +546,10 @@ class Emitter:
         if i.sym:
             self.e(f"call {i.sym}")
         else:
-            self.e(f"jalr ra, {rn(t)}, 0")
+            if self.pc:     # purecap: jump through the capability (a sentry is unsealed into the PCC)
+                self.e(f"cjalr ra, {rn(t)}")
+            else:
+                self.e(f"jalr ra, {rn(t)}, 0")
 
     def i_jt(self, i):
         a = self.src(i.a, SCR_A)

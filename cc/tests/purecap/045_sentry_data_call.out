@@ -1,0 +1,5 @@
+tag 1 type 0 perms 59b, calling <A>
+
+*** capability trap (hardware): cause=4 <A>
+
+---exit 132

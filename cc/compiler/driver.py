@@ -21,7 +21,7 @@ def inline_enabled():
     return os.environ.get("TCC128_NO_INLINE", "") in ("", "0")
 
 
-PC_FEATURES = ("subobject", "stack")   # purecap hardening, each on by default; -fno-<feature> / TCC128_NO_<FEATURE>=1 turns it off
+PC_FEATURES = ("subobject", "stack", "sentry")   # purecap hardening, each on by default; -fno-<feature> / TCC128_NO_<FEATURE>=1 turns it off
 
 
 def pc_feature(name):
@@ -196,6 +196,8 @@ def link(units, entry="_main", purecap=False):
     crt0 = open(os.path.join(LIB_DIR, "crt0_purecap.s" if purecap else "crt0.s")).read()
     if purecap and not pc_feature("stack"):
         crt0 = re.sub(r"# >>stack.*?# <<stack\n", "", crt0, flags=re.S)
+    if purecap and not pc_feature("sentry"):       # -fno-sentries: function relocations stay unsealed
+        crt0 = re.sub(r"^.*# SENTRY.*\n", "", crt0, flags=re.M)
     defs = {}
     for u in units:
         for it in u.items:

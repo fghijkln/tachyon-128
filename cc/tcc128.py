@@ -4,7 +4,7 @@
   tcc128.py prog.c [more.c ...] -o prog.s       compile + link to one assembly file
   tcc128.py prog.c --run                        ... then assemble and run on the golden simulator
   tcc128.py prog.c --run --rtl                  ... and on the Verilator RTL model (build/vtb/Vtb)
-Options: -I dir, -D name[=val], -O0 (no IR optimisation), -mpurecap (capability pointers), -fno-inline, -fno-subobject-bounds, -fno-stack-bounds, --nolibc, --max N (instruction limit),
+Options: -I dir, -D name[=val], -O0 (no IR optimisation), -mpurecap (capability pointers), -fno-inline, -fno-subobject-bounds, -fno-stack-bounds, -fno-sentries, --nolibc, --max N (instruction limit),
          --bin out.bin, --hex out.hex, --stats.
 """
 import argparse
@@ -75,6 +75,8 @@ def main():
                     help="-mpurecap: keep the enclosing object's bounds for &s.field / s.arr")
     ap.add_argument("-fno-stack-bounds", dest="nostackb", action="store_true",
                     help="-mpurecap: stack capability spans all RAM, va_list unbounded")
+    ap.add_argument("-fno-sentries", dest="nosentry", action="store_true",
+                    help="-mpurecap: function pointers are plain (unsealed) code capabilities")
     ap.add_argument("-mpurecap", dest="purecap", action="store_true",
                     help="pure-capability code: every pointer is a bounded capability (cc/ABI.md section 8)")
     ap.add_argument("--run", action="store_true")
@@ -94,6 +96,8 @@ def main():
         os.environ["TCC128_NO_STACK"] = "1"
     if a.nosubobj:
         os.environ["TCC128_NO_SUBOBJECT"] = "1"
+    if a.nosentry:
+        os.environ["TCC128_NO_SENTRY"] = "1"
     try:
         asm_text = compile_files(a.files, a.inc, defines, not a.O0, a.nolibc, a.purecap)
     except CompileError as e:

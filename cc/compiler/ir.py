@@ -109,6 +109,7 @@ class FuncGen:
         from .driver import pc_feature
         self.subobj = self.pc and pc_feature("subobject")   # &s.field / s.arr narrowed to the member
         self.stackb = self.pc and pc_feature("stack")       # bounded stack region + va_list bounds
+        self.sentries = self.pc and pc_feature("sentry")    # v6: function pointers are sealed entry capabilities
 
     # --------------------------------------------------------- helpers
     def vreg(self):
@@ -952,7 +953,8 @@ class FuncGen:
         if op == "address_set" and not self.pc:
             return b
         cc = {"bounds_set": "csetbnd", "address_set": "csetaddr", "perms_and": "candperm",
-              "tag_get": "cgettag", "length_get": "cgetlen", "base_get": "cgetbase", "perms_get": "cgetperm"}[op]
+              "tag_get": "cgettag", "length_get": "cgetlen", "base_get": "cgetbase", "perms_get": "cgetperm",
+              "type_get": "cgettype"}[op]
         r = self.vreg()
         self.emit("bin", d=r, a=a, b=b, cc=cc)
         return r

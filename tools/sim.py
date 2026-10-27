@@ -532,6 +532,8 @@ class Machine:
             return self.rd_write(rd, t)
         if fn == "cclrtag":
             return self.rd_write(rd, a)
+        if fn == "cmove":                       # v6: exact register copy, sealed capabilities included
+            return self.rd_write(rd, a, t, (perm, base, top, otype))
         raise AssertionError(fn)
 
     # ---------------------------------------------------------------- run loop

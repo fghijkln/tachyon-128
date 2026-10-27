@@ -63,9 +63,9 @@ LANE_SUFFIX = {"b": 0, "h": 1, "w": 2, "d": 3}     # 8, 16, 32, 64-bit lanes
 LANE_BITS = [8, 16, 32, 64]
 CAP_FUNCS = ["csetaddr", "cincaddr", "csetbnd", "candperm", "cgetbase", "cgetlen",
              "cgetperm", "cgettag", "cclrtag", "cgetpcc", "csetepcc", "cjalr",
-             "cseal", "cunseal", "cgettype", "csealentry", "cinvoke", "cgetepcc"]
+             "cseal", "cunseal", "cgettype", "csealentry", "cinvoke", "cgetepcc", "cmove"]
 CAP_UNARY = {"cgetbase", "cgetlen", "cgetperm", "cgettag", "cclrtag", "cjalr", "cgettype",
-             "csealentry"}                                                    # rd, rs1
+             "csealentry", "cmove"}                                           # rd, rs1
 # v4 atomics (128-bit, single hart): lr rd, (rs1) / sc rd, rs2, (rs1) / amo<op> rd, rs2, (rs1)
 AMO_FUNCS = ["lr", "sc", "amoswap", "amoadd", "amoand", "amoor", "amoxor"]
 CAP_RD_ONLY = {"cgetpcc", "cgetepcc"}                                                     # rd

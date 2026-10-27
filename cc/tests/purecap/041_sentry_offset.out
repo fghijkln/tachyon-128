@@ -1,0 +1,5 @@
+add(2, 3) = 5 through the sentry at <A>
+
+*** capability trap (hardware): cause=7 <A>
+
+---exit 135

@@ -14,13 +14,14 @@ localparam logic [5:0] OP_BEQ = 6'h30, OP_BNE = 6'h31, OP_BLT = 6'h32, OP_BGE = 
 localparam logic [5:0] OP_JAL = 6'h38, OP_JALR = 6'h39, OP_ECALL = 6'h3B, OP_HALT = 6'h3C, OP_CSRR = 6'h3D,
                        OP_CSRW = 6'h3E, OP_ERET = 6'h3F;
 
-localparam logic [7:0] N_ALU = 8'd27, N_MULDIV = 8'd10, N_CAP = 8'd18, N_AMO = 8'd7;
+localparam logic [7:0] N_ALU = 8'd27, N_MULDIV = 8'd10, N_CAP = 8'd19, N_AMO = 8'd7;
 // v4 atomics (func8 of OP_AMO)
 localparam logic [2:0] AMO_LR = 3'd0, AMO_SC = 3'd1, AMO_SWAP = 3'd2, AMO_ADD = 3'd3, AMO_AND = 3'd4,
                        AMO_OR = 3'd5, AMO_XOR = 3'd6;
 localparam logic [4:0] CF_CGETPCC = 5'd9, CF_CSETEPCC = 5'd10, CF_CJALR = 5'd11,
                        CF_CSEAL = 5'd12, CF_CUNSEAL = 5'd13, CF_CGETTYPE = 5'd14,
-                       CF_CSEALENTRY = 5'd15, CF_CINVOKE = 5'd16, CF_CGETEPCC = 5'd17;
+                       CF_CSEALENTRY = 5'd15, CF_CINVOKE = 5'd16, CF_CGETEPCC = 5'd17,
+                       CF_CMOVE = 5'd18;      // v6: exact register copy (sealed capabilities too)
 localparam logic [15:0] OTYPE_SENTRY = 16'hFFFF;    // reserved otype of sealed entry capabilities
 localparam logic [5:0] N_SIMD = 6'd19;
 localparam logic [13:0] N_CSR = 14'd8;

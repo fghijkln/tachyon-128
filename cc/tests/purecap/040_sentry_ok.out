@@ -1,0 +1,16 @@
+tag 1 type ffff (local)
+tag 1 type ffff (static table)
+tag 1 type ffff (vtable)
+table: 49
+square: area 36 sides 4
+triangle: area 18 sides 3
+heap: 5 -1 6 type ffff
+copy: 81
+varargs: 50
+returned: 42 42
+compare: 1 1 1
+null: 1
+via uintptr_t: 25 type ffff
+qsort: 1 2 3 7 8 9
+
+---exit 0

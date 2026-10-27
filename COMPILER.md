@@ -18,5 +18,12 @@ writes through read-only views and dereferences of forged pointers trap in hardw
 pass in purecap mode (93/93 with the 7 fault tests, `-O` and `-O0`); benchmark overhead is +0.005% to
 +3.5% cycles. See `cc/README.md` and `cc/ABI.md` §8.
 
+v6 purecap hardening (each on by default, with an opt-out flag): sub-object bounds (`&s.field` narrowed to
+the member) and **function-pointer sentries** — every function pointer (`&f`, decay, static initialisers,
+vtable-style tables) is a sealed entry capability (`csealentry`), indirect calls are `cjalr` (which unseals
+it into the PCC), so offsetting, retargeting, dereferencing or writing through a function pointer, calling
+a forged (integer) one, or calling a data pointer all trap (`cc/tests/purecap/04x_sentry_*`, `-fno-sentries`
+to turn it off). The ISA gained a true `cmove` (CAP func 18) so sealed values can be copied between registers.
+
 `-O` also inlines small static functions (`cc/compiler/inline.py`; `-fno-inline` turns it off):
 dhrystone −9.9% and int128 −11.7% RTL cycles, coremark-lite −1.2%; 172/172 C tests, fuzz 500/500.

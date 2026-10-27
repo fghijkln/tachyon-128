@@ -294,7 +294,7 @@ sacrificed to compression, and a cursor may move out of bounds without losing th
 be dereferenced there).
 
 **Unforgeability.** The only instructions that produce a tagged result are `csetaddr`, `cincaddr(i)`,
-`csetbnd(i)` and `candperm` (only when their `rs1` is already tagged), `clc`, `lr` and `amoswap` (v4; only
+`csetbnd(i)`, `candperm` and **v6** `cmove` (only when their `rs1` is already tagged), `clc`, `lr` and `amoswap` (v4; only
 from a granule whose shadow tag is set, which only `csc`, `sc` or `amoswap` of a tagged register can set, each under
 the STORE_CAP / STORE_LOCAL rules); `cgetpcc` and the `cjalr` link copy the PCC, which itself only ever comes from
 root, a tagged register (`cjalr`, `csetepcc`) or EPCC, and `cgetepcc` (v4, supervisor-only) copies EPCC, which only
@@ -324,6 +324,7 @@ tag. Tags therefore descend only from the root capability in `rc` at reset.
 | 15 | `csealentry rd, rs1` | **v3:** seal rs1 as a sealed entry capability (sentry), §5.1.4 |
 | 16 | `cinvoke rd, rs1, rs2` | **v3:** domain call through a sealed code (rs1) + data (rs2) pair, §5.1.4 |
 | 17 | `cgetepcc rd` | **v4:** rd = EPCC (tagged) with cursor = `epc`. *Privileged* (user mode → *privilege-violation*) |
+| 18 | `cmove rd, rs1` | **v6:** rd = rs1 exactly — value, tag, bounds, perms **and otype**. The only register copy that works on sealed capabilities (sentries included); never traps. (Before v6 `cmove` was an assembler alias of `cincaddri rd, rs1, 0`, which raises *cap-sealed* on a sealed source.) |
 | — | `cincaddri rd, rs1, simm14` (op 0x11) | immediate form of `cincaddr` |
 | — | `csetbndi rd, rs1, uimm14` (op 0x12) | immediate form of `csetbnd` |
 
@@ -437,6 +438,9 @@ one exception: **`cjalr` accepts it** and atomically unseals it into the PCC:
   capability is unchanged (unsealed link).
 * So a library can hand out sentries to its entry points: callers can only enter at that exact address, under the
   library's own PCC bounds.
+* **v6:** sentries (and other sealed capabilities) are copied between registers with `cmove` (func 18), which
+  preserves the otype; `csc`/`clc` already preserved it in memory. tcc128 `-mpurecap` makes every C function
+  pointer a sentry and calls through it with `cjalr` (`cc/ABI.md` §8.1).
 
 **`cinvoke rd, rs1, rs2`** — call into a protection domain represented by a *pair*: a sealed code capability
 (rs1) and a sealed data capability (rs2) sealed with the same otype by the domain's owner. Checks in order:

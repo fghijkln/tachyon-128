@@ -428,6 +428,7 @@ module tx_core #(
         else cap_fault = 1'b0;
       end
       CF_CGETTYPE: cap_y = {112'd0, a_ot};
+      CF_CMOVE: begin cap_y = a; cap_m = ma; end                     // v6: copy, seal and all
       default: cap_y = a;                                            // cclrtag
     endcase
     // sealed capabilities are immutable: csetaddr / cincaddr / csetbnd / candperm trap

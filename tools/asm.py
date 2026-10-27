@@ -294,9 +294,6 @@ class Assembler:
         if mn == "mv":
             need(2)
             return [enc_i(OP_ADDI, R(ops[0]), R(ops[1]), 0)]
-        if mn == "cmove":
-            need(2)
-            return [enc_i(OP_CINCADDRI, R(ops[0]), R(ops[1]), 0)]
         if mn == "not":
             need(2)
             return [enc_i(OP_XORI, R(ops[0]), R(ops[1]), -1)]
