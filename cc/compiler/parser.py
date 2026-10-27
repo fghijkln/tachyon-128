@@ -476,36 +476,33 @@ class Parser:
             t.size = align_to(size, align)
             t.align = align
         else:
-            off = 0           # byte offset
-            bitpos = 0        # absolute bit position when packing bitfields
+            bitpos = 0        # absolute bit position
             align = 1
             for m in members:
                 if m.bit_width is not None:
                     sz = m.ty.size
                     if m.bit_width == 0:
-                        bitpos = align_to(max(bitpos, off * 8), sz * 8)
-                        off = bitpos // 8
+                        bitpos = align_to(bitpos, sz * 8)
                         continue
-                    start = max(bitpos, off * 8)
-                    # does it fit in the storage unit containing 'start'?
-                    unit = (start // (sz * 8)) * sz * 8
+                    unit = (bitpos // (sz * 8)) * sz * 8
+                    start = bitpos
                     if start + m.bit_width > unit + sz * 8:
                         unit = align_to(start, sz * 8)
                         start = unit
                     m.offset = unit // 8
                     m.bit_offset = start - unit
                     bitpos = start + m.bit_width
-                    off = (bitpos + 7) // 8
-                    align = max(align, m.ty.align)
+                    if m.name is not None:
+                        align = max(align, m.ty.align)
                     continue
                 a = getattr(m, "align", None) or m.ty.align
-                off = align_to(max(off, (bitpos + 7) // 8), a)
-                bitpos = 0
+                off = align_to((bitpos + 7) // 8, a)
                 m.offset = off
                 if m.ty.is_array() and m.ty.length < 0:
                     m.ty = array_of(m.ty.base, 0)   # flexible array member
-                off += m.ty.size
+                bitpos = (off + m.ty.size) * 8
                 align = max(align, a)
+            off = (bitpos + 7) // 8
             t.size = align_to(off, align)
             t.align = align
         t.members = members
