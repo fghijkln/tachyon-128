@@ -1287,6 +1287,58 @@ ok1:    amoadd r10, r8, (r5)
         amoadd r25, r23, (r15)
         lq r26, 16(r5)
 """ + POST + handler + DATA
+    # ---------------- v4: readable EPCC
+    T["epcc_read"] = PRE + """
+        la r4, eh
+        csrw tvec, r4
+        cgetepcc r10             # reset: root, cursor = epc = 0
+        cgetperm r11, r10
+        la r5, data
+        li r6, 64
+        csetaddr r12, rc, r5
+        csetbnd r12, r12, r6
+        csetepcc r12
+        cgetepcc r13             # right behind csetepcc (EPCC written in MEM): sees the new EPCC
+        cgetbase r14, r13        # load-use style interlock on the cgetepcc result
+        csrw epc, r5
+        cgetepcc r15             # right behind csrw epc: cursor = new epc
+        add r16, r15, r15
+        la r6, fn
+        csetaddr r17, rc, r6
+        csetbndi r17, r17, fend - fn
+        li r7, 0x1A5             # EXEC|LOAD|SEAL|GLOBAL|LM
+        candperm r17, r17, r7
+        csealentry r18, r17
+        cjalr r1, r18            # sentry call into a bounded region that traps
+        cgetepcc r30             # after eret: EPCC = the region's (unsealed) PCC
+        cgetlen r31, r30
+        cgettype r32, r30
+        li r7, 0x10
+        csrw status, r7          # PU: eret drops to user mode
+        la r6, uc
+        csrw epc, r6
+        csetepcc rc
+        eret
+uc:     cgetepcc r33             # user mode: privilege-violation
+        ecall
+        halt zero
+fn:     addi r20, r20, 1
+        ecall                    # trap inside the sentry-entered region
+        cjalr r0, r1
+fend:
+eh:     cgetepcc r40             # handler: the trapping instruction's PCC, cursor = epc
+        cgetbase r41, r40
+        cgetlen r42, r40
+        cgetperm r43, r40
+        csrr r44, cause
+        csrr r45, epc
+        addi r45, r45, 4
+        csrw epc, r45
+        csrr r46, status
+        andi r46, r46, -17       # back to supervisor
+        csrw status, r46
+        eret
+""" + DATA
     # ---------------- v3: user / supervisor privilege
     phandler = """
 phandler: csrr r50, cause

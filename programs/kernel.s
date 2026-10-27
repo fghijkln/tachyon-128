@@ -149,6 +149,8 @@ k_irq:  la   t0, n_preempt               # timer: switch to the other task
         call copy64
         csrr t0, epc
         sq   t0, T_PC(s2)
+        cgetepcc t0                      # v4: the interrupted task's PCC (readable EPCC) -> tcb.pcc
+        csc  t0, T_PCC(s2)
 
 k_next: li   t3, 2                       # pick the next alive task (round robin over 2)
 k_nl:   addi s1, s1, 1

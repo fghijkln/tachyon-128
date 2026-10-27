@@ -241,7 +241,7 @@ class Machine:
         f = fields(w)
         op, rd, rs1, rs2, func = f["op"], f["rd"], f["rs1"], f["rs2"], f["func"]
         if self.user and (op in (OP_ERET, OP_HALT) or (op in (OP_CSRR, OP_CSRW) and f["uimm14"] < NUM_CSRS)
-                          or (op == OP_CAP and func < len(CAP_FUNCS) and CAP_FUNCS[func] == "csetepcc")):
+                          or (op == OP_CAP and func < len(CAP_FUNCS) and CAP_FUNCS[func] in ("csetepcc", "cgetepcc"))):
             raise Trap(CAUSE_PRIV, w)       # privileged instruction in user mode
         A = f["rd"]                       # field A (store data / branch rs2 / wins source)
         x1, x2 = self.val[rs1], self.val[rs2]
@@ -294,6 +294,8 @@ class Machine:
                 if self.meta[rs1][3]:
                     raise Trap(CAUSE_CAP_SEALED, x1)
                 self._new_epcc = self.meta[rs1]
+            elif fn == "cgetepcc":                       # v4: read EPCC (cursor = epc), supervisor only
+                wrote = self.rd_write(rd, self.csr[1], 1, self.epcc)
             elif fn == "cjalr":
                 if not self.tag[rs1]:
                     raise Trap(CAUSE_CAP_TAG, x1)

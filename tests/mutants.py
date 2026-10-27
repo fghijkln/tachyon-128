@@ -84,6 +84,10 @@ MUTANTS = [
     ("amo_mmio_allowed", "tx_core.sv", "(!in_mmio || is_amo)", "!in_mmio"),
     ("amoswap_no_store_cap_check", "tx_core.sv", "((amo_fn == AMO_SC) | (amo_fn == AMO_SWAP)));  // stores rs2's tag",
      "(amo_fn == AMO_SC));  // stores rs2's tag"),
+    ("cgetepcc_reads_in_ex", "tx_core.sv", "exmem_getepcc ? csr_epc : exmem_val);", "exmem_val);"),
+    ("cgetepcc_user_allowed", "tx_core.sv", "ex_setepcc | ex_getepcc;", "ex_setepcc;"),
+    ("cgetepcc_no_interlock", "tx_core.sv", " ||   // AMO results come from MEM\n                    (idex_inst[5:0] == OP_CAP && idex_inst[28:24] == CF_CGETEPCC));",
+     ");"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

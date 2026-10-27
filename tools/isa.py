@@ -56,12 +56,12 @@ LANE_SUFFIX = {"b": 0, "h": 1, "w": 2, "d": 3}     # 8, 16, 32, 64-bit lanes
 LANE_BITS = [8, 16, 32, 64]
 CAP_FUNCS = ["csetaddr", "cincaddr", "csetbnd", "candperm", "cgetbase", "cgetlen",
              "cgetperm", "cgettag", "cclrtag", "cgetpcc", "csetepcc", "cjalr",
-             "cseal", "cunseal", "cgettype", "csealentry", "cinvoke"]
+             "cseal", "cunseal", "cgettype", "csealentry", "cinvoke", "cgetepcc"]
 CAP_UNARY = {"cgetbase", "cgetlen", "cgetperm", "cgettag", "cclrtag", "cjalr", "cgettype",
              "csealentry"}                                                    # rd, rs1
 # v4 atomics (128-bit, single hart): lr rd, (rs1) / sc rd, rs2, (rs1) / amo<op> rd, rs2, (rs1)
 AMO_FUNCS = ["lr", "sc", "amoswap", "amoadd", "amoand", "amoor", "amoxor"]
-CAP_RD_ONLY = {"cgetpcc"}                                                     # rd
+CAP_RD_ONLY = {"cgetpcc", "cgetepcc"}                                                     # rd
 CAP_RS1_ONLY = {"csetepcc"}                                                   # rs1
 
 I_OPS = {"addi": OP_ADDI, "andi": OP_ANDI, "ori": OP_ORI, "xori": OP_XORI, "slti": OP_SLTI,

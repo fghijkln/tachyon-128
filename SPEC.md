@@ -27,6 +27,7 @@
 - **异常**：非法指令、能力错误（tag/边界/权限/密封）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
 - **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
+- **v4 可读 EPCC**：`cgetepcc rd`（仅内核态）读出 EPCC（游标 = epc），内核可在抢占时保存任务的真实 PCC。
 - **v4 原子操作**：128 位 `lr`/`sc`（单核语义，任何存储或陷入都会清除保留）以及 `amoswap/amoadd/amoand/amoor/amoxor`；`lr`/`sc`/`amoswap` 遵循 `clc`/`csc` 的标签规则，可原子地交换能力。
 - **v4 微架构**：8 项返回地址栈（RAS，推测更新 + 提交副本在陷入时恢复）预测 `call`/`ret`；乘法器面积缩小——标量乘法的 128×32 部分积阵列与 SIMD `vmul` 共享一块“可拆分”的 4×(32×32) radix-4 Booth 乘法阵列（仍为 6 周期）。
 - **实现**：Python 汇编器/反汇编器/黄金参考模拟器；SystemVerilog 五级流水线（前递、load-use 互锁、v3 BTB + 2 位计数器分支预测、v3 4 遍 6 周期乘法器、radix-4 除法器，带结果缓存），用 Verilator 与黄金模型逐条提交轨迹对比验证，用 Yosys 综合统计单元数。
@@ -292,6 +293,7 @@ tag. Tags therefore descend only from the root capability in `rc` at reset.
 | 14 | `cgettype rd, rs1` | otype (0 if unsealed or untagged; `0xFFFF` for a sentry) |
 | 15 | `csealentry rd, rs1` | **v3:** seal rs1 as a sealed entry capability (sentry), §5.1.4 |
 | 16 | `cinvoke rd, rs1, rs2` | **v3:** domain call through a sealed code (rs1) + data (rs2) pair, §5.1.4 |
+| 17 | `cgetepcc rd` | **v4:** rd = EPCC (tagged) with cursor = `epc`. *Privileged* (user mode → *privilege-violation*) |
 | — | `cincaddri rd, rs1, simm14` (op 0x11) | immediate form of `cincaddr` |
 | — | `csetbndi rd, rs1, uimm14` (op 0x12) | immediate form of `csetbnd` |
 
@@ -351,7 +353,12 @@ of the PCC region traps at the next fetch. Only these change it:
 | `eret` | PCC ← EPCC |
 | `csetepcc rs1` | EPCC ← rs1 (lets a handler choose the PCC it returns under) |
 
-`cgetpcc rd` reads the PCC. EPCC is reset to root. A pure-capability code region is entered with e.g.
+`cgetpcc rd` reads the PCC. EPCC is reset to root. **v4:** `cgetepcc rd` reads EPCC (cursor = `epc`, so the pair
+`{epc, EPCC}` comes back as one capability); it is supervisor-only, like `csetepcc`. A kernel can now save the
+interrupted task's exact PCC on every trap (`cgetepcc` + `csc` into the task control block) and restore it with
+`csetepcc` before `eret`, instead of tracking each task's PCC itself; `programs/kernel.s` does this on preemption.
+(In the pipeline `cgetepcc` reads EPCC and `epc` in MEM, after every older `csetepcc`/`csrw epc`, with the
+CSR-read-use interlock.) A pure-capability code region is entered with e.g.
 ```
 la        t0, func
 csetaddr  t0, rc, t0
@@ -550,7 +557,8 @@ never U, so the only way into user mode is `eret` with PU = 1, which also instal
 In user mode:
 
 1. **Privileged instructions** raise *privilege-violation* (cause 9, `tval` = instruction word): `csrr`/`csrw` of
-   any implemented CSR (an unimplemented CSR number is still *illegal-instruction*), `eret`, `halt`, `csetepcc`.
+   any implemented CSR (an unimplemented CSR number is still *illegal-instruction*), `eret`, `halt`, `csetepcc`,
+   **v4:** `cgetepcc`.
    The privilege check comes before the instruction's own operand checks (e.g. `csetepcc r0` is cause 9, not 2).
 2. **Untagged (hybrid) data accesses** must satisfy `ubase ≤ ea` and `ea + size ≤ ubound`, otherwise
    *privilege-violation* with `tval = ea`. This check replaces the misaligned/access-fault checks for such accesses
@@ -603,8 +611,9 @@ label:  op operands      # comment   (';' also starts a comment)
 
 * v4 has GLOBAL / STORE_LOCAL / LOAD_MUTABLE / PERMIT_CINVOKE (§5.1.5, §5.1.6), but no CHERI LOAD_GLOBAL
   (capabilities loaded through any authority keep their GLOBAL bit) and no PERMIT_SET_CID / compartment IDs.
-* Two privilege levels only; no per-mode CSR views (user mode cannot read any CSR); EPCC is write-only
-  (`csetepcc`), so a kernel tracks each task's PCC itself; `rc` is the only root of authority after reset.
+* Two privilege levels only; no per-mode CSR views (user mode cannot read any CSR); `rc` is the only root of
+  authority after reset. (v4: EPCC is readable by the supervisor with `cgetepcc`; `ubase`/`ubound` were already
+  readable CSRs, so a kernel saves the whole per-task context.)
 * No virtual memory/MMU — the 128-bit address space is flat; RAM is small and physical.
 * One interrupt source (the deterministic machine timer); no external/software interrupts, no wall-clock time base.
 * No FPU, no fence for self-modifying code. Atomics (§4.6) are single-hart only: no multi-core coherence, the

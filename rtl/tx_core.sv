@@ -108,6 +108,7 @@ module tx_core #(
   logic         exmem_cjalr, exmem_setepcc;
   logic         idex_call, idex_ret, exmem_call, exmem_ret;   // RAS classification (v4)
   logic         exmem_amo;                                    // v4 atomic in MEM (fn in exmem_amofn)
+  logic         exmem_getepcc;                                // v4 cgetepcc: value read in MEM
   logic [2:0]   exmem_amofn;
   logic         resv_v;                                       // lr/sc reservation (valid, granule)
   logic [RB-5:0] resv_g;
@@ -250,7 +251,8 @@ module tx_core #(
 
   // load-use / csrr-use interlock
   wire ex_is_late = idex_valid & idex_we & ((idex_inst[5:0] >= OP_LB && idex_inst[5:0] <= OP_CLC) ||
-                    idex_inst[5:0] == OP_CSRR || idex_inst[5:0] == OP_AMO);   // AMO results come from MEM
+                    idex_inst[5:0] == OP_CSRR || idex_inst[5:0] == OP_AMO ||   // AMO results come from MEM
+                    (idex_inst[5:0] == OP_CAP && idex_inst[28:24] == CF_CGETEPCC));   // so does cgetepcc (v4)
   wire stall_lu = ifid_valid & ex_is_late &
                   ((id_use1 & id_rs1 == idex_rd) | (id_use2 & id_rs2 == idex_rd));
 
@@ -265,7 +267,7 @@ module tx_core #(
   // forwarding
   logic [127:0]  a, b;
   logic [MW-1:0] ma, mb;
-  wire mem_fwd_ok = exmem_valid & exmem_we & ~exmem_load & ~exmem_csrr;
+  wire mem_fwd_ok = exmem_valid & exmem_we & ~exmem_load & ~exmem_csrr & ~exmem_getepcc;
   always_comb begin
     a = idex_v1; ma = idex_m1;
     if (mem_fwd_ok && exmem_rd == idex_rs1) begin a = exmem_val; ma = exmem_meta; end
@@ -484,6 +486,7 @@ module tx_core #(
   // cjalr and cinvoke both jump to rs1's cursor and install rs1 (unsealed) as the PCC
   wire ex_cjalr  = ex_k[K_CAPR] & ((ex_fn[4:0] == CF_CJALR) | (ex_fn[4:0] == CF_CINVOKE));
   wire ex_setepcc = ex_k[K_CAPR] & (ex_fn[4:0] == CF_CSETEPCC);
+  wire ex_getepcc = ex_k[K_CAPR] & (ex_fn[4:0] == CF_CGETEPCC);   // reads EPCC/epc in MEM, like csrr
   // cjalr / cinvoke always redirect (they also switch the fetch PCC); trapping instructions never do
   wire ex_redirect = idex_valid & ~ex_trap & (ex_cjalr | (ex_anpc != idex_pnpc));
   wire [127:0] ex_target = ex_cjalr ? (a & ~128'd3) : ex_anpc;
@@ -693,7 +696,8 @@ module tx_core #(
         exmem_tval0  <= ex_tval;
         exmem_inst   <= idex_inst;
         exmem_eaend  <= ea_end;
-        exmem_priv   <= ex_k[K_CSRR] | ex_k[K_CSRW] | ex_k[K_ERET] | ex_k[K_HALT] | ex_setepcc;
+        exmem_priv   <= ex_k[K_CSRR] | ex_k[K_CSRW] | ex_k[K_ERET] | ex_k[K_HALT] | ex_setepcc | ex_getepcc;
+        exmem_getepcc <= ex_getepcc;
         exmem_hyb    <= is_mem & ~a_tag;
         exmem_csrr  <= ex_k[K_CSRR];
         exmem_csrw  <= ex_k[K_CSRW];
@@ -743,9 +747,10 @@ module tx_core #(
       memwb_pc    <= exmem_pc;
       memwb_rd    <= exmem_rd;
       memwb_we    <= exmem_we & ~exmem_trap & ~mem_irq;
-      memwb_val   <= mem_sc ? {127'd0, ~resv_hit} : exmem_load ? ld_val : (exmem_csrr ? csr_rd : exmem_val);
+      memwb_val   <= mem_sc ? {127'd0, ~resv_hit} : exmem_load ? ld_val : (exmem_csrr ? csr_rd :
+                     exmem_getepcc ? csr_epc : exmem_val);
       memwb_meta  <= exmem_load ? ((exmem_clc & ~exmem_mmio & exmem_ldcap & dmem_rmeta[M_TAG]) ? clc_meta : '0)
-                                : (exmem_csrr ? '0 : exmem_meta);
+                                : (exmem_csrr ? '0 : exmem_getepcc ? epcc_q : exmem_meta);
       memwb_trap  <= exmem_trap | mem_irq;
       memwb_cause <= mem_irq ? IRQ_TIMER : exmem_cause;
       memwb_tval  <= mem_irq ? '0 : exmem_tval;
