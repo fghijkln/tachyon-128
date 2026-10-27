@@ -620,6 +620,71 @@ def hoist_constants(code):
     return code
 
 
+LICM_BIN = {"add", "sub", "and", "or", "xor", "sll", "srl", "sra", "slt", "sltu", "seq", "mul",
+            "min", "max", "minu", "maxu", "addw", "subw", "mulw", "sllw", "addwu", "subwu", "mulwu", "sllwu"}
+
+
+def hoist_invariants(code):
+    """v6 loop-invariant code motion: a single-definition pure, non-trapping instruction inside a
+    loop whose operands are not written anywhere in the loop moves to the preheader (repeated,
+    so chains of invariant ops move together).  Loops as in hoist_constants (the preheader
+    position dominates the loop); hoisting is speculative, which is safe for these ops."""
+    rounds = 0
+    changed = True
+    while changed and rounds < 200:
+        changed = False
+        rounds += 1
+        label_pos = {i.label: k for k, i in enumerate(code) if i.op == "label"}
+        refs = {}
+        for k, i in enumerate(code):
+            if i.op in ("br", "bcc"):
+                refs.setdefault(i.label, []).append(k)
+            elif i.op == "jt":
+                for l in i.extra:
+                    refs.setdefault(l, []).append(k)
+        loops = []
+        for t, i in enumerate(code):
+            if i.op in ("br", "bcc") and i.label in label_pos and label_pos[i.label] < t:
+                loops.append((t - label_pos[i.label], label_pos[i.label], t))
+        loops.sort()
+        dc = def_counts(code)
+        for _, h, t in loops:
+            if any(code[k].op == "label" and any(not (h <= r <= t) for r in refs.get(code[k].label, []))
+                   for k in range(h, t + 1)):
+                continue
+            written = set()
+            for k in range(h, t + 1):
+                written.update(d for d in code[k].defs() if d is not None)
+            hoist = []
+            for k in range(h, t + 1):
+                i = code[k]
+                if i.d is None or i.d < VREG0 or dc.get(i.d) != 1:
+                    continue
+                if i.op == "bin":
+                    if i.cc not in LICM_BIN:
+                        continue
+                elif i.op == "ext":
+                    pass
+                elif i.op == "faddr" and not PURECAP and i.sym != "INCOMING":
+                    pass
+                else:
+                    continue
+                srcs = [u for u in i.uses() if u is not None]
+                if any((u != ZERO and u < VREG0) or u in written for u in srcs):
+                    continue
+                hoist.append(k)
+                written.discard(i.d)
+            if not hoist:
+                continue
+            moved = [code[k] for k in hoist]
+            hs = set(hoist)
+            body = [code[k] for k in range(h, t + 1) if k not in hs]
+            code[:] = code[:h] + moved + body + code[t + 1:]
+            changed = True
+            break
+    return code
+
+
 CSE_OPS = {"bin", "ext", "li", "la", "faddr"}
 
 
