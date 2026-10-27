@@ -191,7 +191,10 @@ class Machine:
         v = int.from_bytes(self.ram[ea:ea + 16], "little")
         g = ea // GRANULE
         if g in self.mtag and (not self.tag[rs1] or self.meta[rs1][0] & PERM_LOAD_CAP):
-            return v, 1, self.mtag[g]
+            p, b, t, o = self.mtag[g]
+            if self.tag[rs1] and not self.meta[rs1][0] & PERM_STORE and not o:
+                p &= ~(PERM_STORE | PERM_STORE_CAP)     # loaded through a read-only view: deep read-only
+            return v, 1, (p, b, t, o)
         return v, 0, NULL_META
 
     def store_cap(self, rs1, ea, A):
@@ -273,13 +276,42 @@ class Machine:
             elif fn == "cjalr":
                 if not self.tag[rs1]:
                     raise Trap(CAUSE_CAP_TAG, x1)
-                if self.meta[rs1][3]:
+                sentry = self.meta[rs1][3] == OTYPE_SENTRY
+                if self.meta[rs1][3] and not sentry:
                     raise Trap(CAUSE_CAP_SEALED, x1)
                 if not self.meta[rs1][0] & PERM_EXEC:
                     raise Trap(CAUSE_CAP_PERM, x1)
                 npc = x1 & ~3
-                self._new_pcc = self.meta[rs1]
-                wrote = self.rd_write(rd, pc + 4, 1, self.pcc)    # link = PCC with cursor pc+4
+                p1, b1, t1, _ = self.meta[rs1]
+                self._new_pcc = (p1, b1, t1, 0)                    # a sentry is unsealed by the jump
+                lp, lb, lt, _ = self.pcc                            # link = PCC with cursor pc+4,
+                wrote = self.rd_write(rd, pc + 4, 1, (lp, lb, lt, OTYPE_SENTRY if sentry else 0))  # sealed if sentry
+            elif fn == "csealentry":
+                p1, b1, t1, o1 = self.meta[rs1]
+                if not self.tag[rs1]:
+                    raise Trap(CAUSE_CAP_TAG, x1)
+                if o1:
+                    raise Trap(CAUSE_CAP_SEALED, x1)
+                if not p1 & PERM_EXEC:
+                    raise Trap(CAUSE_CAP_PERM, x1)
+                wrote = self.rd_write(rd, x1, 1, (p1, b1, t1, OTYPE_SENTRY))
+            elif fn == "cinvoke":
+                (p1, b1, t1, o1), (p2, b2, t2, o2) = self.meta[rs1], self.meta[rs2]
+                if not self.tag[rs1]:
+                    raise Trap(CAUSE_CAP_TAG, x1)
+                if not self.tag[rs2]:
+                    raise Trap(CAUSE_CAP_TAG, x2)
+                if o1 in (0, OTYPE_SENTRY):
+                    raise Trap(CAUSE_CAP_SEALED, x1)
+                if o2 in (0, OTYPE_SENTRY) or o2 != o1:
+                    raise Trap(CAUSE_CAP_SEALED, x2)
+                if not p1 & PERM_EXEC:
+                    raise Trap(CAUSE_CAP_PERM, x1)
+                if p2 & PERM_EXEC:
+                    raise Trap(CAUSE_CAP_PERM, x2)
+                npc = x1 & ~3
+                self._new_pcc = (p1, b1, t1, 0)
+                wrote = self.rd_write(rd, x2, 1, (p2, b2, t2, 0))
             elif fn in ("cseal", "cunseal"):
                 wrote = self.seal_op(fn, rd, rs1, rs2)
             else:
@@ -380,7 +412,7 @@ class Machine:
             if k < b2 or k >= top2 or k == 0 or k > OTYPE_MAX:
                 raise Trap(CAUSE_CAP_BOUNDS, k)
             return self.rd_write(rd, a, 1, (p1, b1, top1, k))
-        if not ot1:
+        if not ot1 or ot1 == OTYPE_SENTRY:          # sentries cannot be unsealed explicitly
             raise Trap(CAUSE_CAP_SEALED, a)
         if ot2:
             raise Trap(CAUSE_CAP_SEALED, k)

@@ -63,9 +63,9 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2])[0]
-        if not allow_ctrl and k in ("br", "loop", "jal", "cjalr"):
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2])[0]
+        if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke"):
             k = "alu"
         if k == "alu":
             f = r.choice(ALU_FUNCS)
@@ -120,7 +120,8 @@ class Gen:
             if r.random() < 0.5:
                 self.emit(f"{r.choice(['mul', 'mulhu'])} r{self.dst()}, r{d}, r{r.choice([ra, rb, d])}")
         elif k == "cap":
-            f = r.choice([c for c in CAP_FUNCS if c != "cjalr"] + ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal"])
+            f = r.choice([c for c in CAP_FUNCS if c not in ("cjalr", "cinvoke")] +
+                         ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal", "csealentry"])
             s1 = r.choice([60, 63, self.src(), self.src()])
             if f in CAP_RD_ONLY:
                 self.emit(f"{f} r{self.dst()}")
@@ -204,6 +205,8 @@ class Gen:
             if c < 0.1:
                 self.emit("li r56, 0x1B")            # no EXEC -> cap-permission at the cjalr
                 self.emit("candperm r57, r57, r56")
+            elif c < 0.4:
+                self.emit("csealentry r57, r57")     # sentry call: unsealed on entry, link is a sentry
             self.emit("cjalr r56, r0" if c > 0.93 else "cjalr r56, r57")   # untagged -> cap-tag
             self.emit(f"j {La}")
             self.out.append(f"{Lt}:")
@@ -211,6 +214,40 @@ class Gen:
                 self.one(allow_ctrl=False)
             if r.random() < 0.3:
                 self.emit(f"cgetpcc r{self.dst()}")
+            self.out.append(f"{Le}:")
+            self.emit("cjalr r0, r56")
+            self.out.append(f"{La}:")
+        elif k == "cinvoke":        # CInvoke-style domain call: sealed code + data pair, return sentry
+            Lp, Lr, Lt, Le, La = (self.label() for _ in range(5))
+            self.emit(f"la r57, {Lt}")
+            self.emit("csetaddr r57, rc, r57")
+            self.emit(f"csetbndi r57, r57, {Le} - {Lt} + 4")
+            c = r.random()
+            self.emit(f"cseal r57, r57, r{55 if c > 0.05 else 63}")        # sealed code (root: bad otype)
+            if c < 0.1:
+                self.emit("csealentry r57, r57")                          # (fails: already sealed / untagged)
+            c2 = r.random()
+            if c2 < 0.1:                                                  # data sealed with otype+1 -> mismatch
+                self.emit("cincaddri r59, r55, 1")
+                self.emit("cseal r59, r60, r59")
+            else:
+                self.emit(f"cseal r59, r{60 if c2 > 0.17 else 63}, r55")  # sealed data (rc has EXEC -> fault)
+            if r.random() < 0.05:
+                self.emit("cunseal r59, r59, r55")                        # unsealed data -> cap-sealed
+            self.out.append(f"{Lp}:")
+            self.emit("cgetpcc r56")
+            self.emit(f"cincaddri r56, r56, {Lr} - {Lp}")
+            if r.random() < 0.8:
+                self.emit("csealentry r56, r56")                          # return sentry
+            self.emit(f"cinvoke r58, r57, r59")
+            self.out.append(f"{Lr}:")
+            self.emit(f"j {La}")
+            self.out.append(f"{Lt}:")
+            for _ in range(r.randint(1, 6)):
+                if r.random() < 0.25:
+                    self.emit(f"{r.choice(['lq', 'ld', 'clc'])} r{self.dst()}, {r.randrange(0, 1024, 16)}(r58)")
+                else:
+                    self.one(allow_ctrl=False)
             self.out.append(f"{Le}:")
             self.emit("cjalr r0, r56")
             self.out.append(f"{La}:")
@@ -242,7 +279,7 @@ def gen_program(seed, n=None):
         g.emit("li r6, 3")              # sometimes a read-only data capability
         g.emit(f"candperm r60, r60, r{r.choice([6, 5])}")
     elif r.random() < 0.3:
-        g.emit(f"li r6, {r.choice([0x0F, 0x17, 0x1B])}")   # drop LOAD_CAP or STORE_CAP or LOAD
+        g.emit(f"li r6, {r.choice([0x0F, 0x17, 0x1B, 0x09, 0x0D, 0x19])}")   # drop STORE_CAP / LOAD_CAP / LOAD / STORE
         g.emit("candperm r60, r60, r6")
     g.emit("li r54, 0x60")                  # sealing authority (SEAL|UNSEAL), cursor = small otype
     g.emit("candperm r55, rc, r54")

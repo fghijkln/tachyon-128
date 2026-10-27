@@ -676,6 +676,163 @@ h2n:    addi r51, r51, 4
         cgetperm r37, rc
         addi r38, r38, 1
 """ + POST + handler + DATA
+    # ---------------- v3: sealed entry capabilities (sentries) and cinvoke
+    T["sentry_ops"] = PRE + setup + """
+        la r6, func
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, tail - func + 4   # code capability for func only
+        csealentry r11, r10      # sentry
+        cgettype r12, r11        # 0xFFFF
+        cgettag r13, r11
+        lq r14, 0(r11)           # deref a sentry -> cap-sealed
+        cincaddri r14, r11, 4    # modify -> cap-sealed
+        csetaddr r14, r11, r6    # -> cap-sealed
+        cjalr r1, r11            # call through the sentry: unsealed into PCC, r1 = sentry link
+        cgettype r15, r1         # link stayed a sentry in the caller too
+        cjalr r1, r10            # plain call: plain (unsealed) link
+        li r7, 0xFFFF
+        csetaddr r16, rc, r7
+        cseal r17, r10, r16      # otype 0xFFFF is reserved -> cap-bounds
+        li r7, 9
+        csetaddr r16, rc, r7
+        cseal r17, r10, r16      # ordinary sealed code cap (otype 9)
+        cjalr r1, r17            # sealed but not a sentry -> cap-sealed
+        csealentry r18, r17      # already sealed -> cap-sealed
+        csealentry r18, r6       # untagged -> cap-tag
+        li r7, 3
+        candperm r19, r10, r7    # no EXEC
+        csealentry r18, r19      # -> cap-permission
+        li r7, 0xFFFF
+        csetaddr r16, rc, r7
+        cunseal r18, r11, r16    # sentries cannot be cunseal'ed -> cap-sealed
+        csc r11, 0(r5)           # sentries survive tagged memory
+        clc r20, 0(r5)
+        cjalr r1, r20            # call through the reloaded sentry
+        csealentry r21, r10
+        li r1, 0
+        cjalr r0, r21            # sentry jump without link (tail call): func halts via 'tail'
+back:   addi r40, r40, 1
+        halt zero
+func:   cgetpcc r30              # unsealed PCC, bounds = func
+        cgettype r31, r30
+        cgettype r32, r1
+        addi r33, r33, 1
+        lq r34, 0(r1)            # callee cannot read through the sentry link -> cap-sealed
+        beqz r1, tail
+fend:   cjalr r0, r1             # return through the (sentry or plain) link
+tail:   halt zero
+""" + handler + DATA
+    T["sentry_hazards"] = PRE + setup + """
+        la r6, f2
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, 16
+        csealentry r11, r10      # sentry consumed by the very next instruction (EX->EX forwarding)
+        cjalr r1, r11
+        csealentry r12, r10
+        nop
+        cjalr r1, r12            # MEM->EX forwarding
+        csc r12, 16(r5)
+        clc r13, 16(r5)
+        cjalr r1, r13            # load-use into a sentry jump
+        halt zero
+f2:     addi r20, r20, 1
+        cgettype r21, r1
+        cjalr r0, r1
+        addi r22, r22, 1         # never
+""" + handler + DATA
+    T["cinvoke_ops"] = PRE + setup + """
+        la r6, method
+        csetaddr r10, rc, r6
+        csetbndi r10, r10, mend - method + 4    # code: EXEC, method only
+        li r7, 64
+        csetaddr r11, rc, r5
+        csetbnd r11, r11, r7
+        li r7, 0x1B              # data: LOAD|STORE|LOAD_CAP|STORE_CAP, no EXEC
+        candperm r11, r11, r7
+        li r7, 0x60
+        candperm r12, rc, r7
+        li r7, 77
+        csetaddr r12, r12, r7    # sealing authority, otype 77
+        cseal r13, r10, r12      # sealed code
+        cseal r14, r11, r12      # sealed data
+        li r7, 0x5555
+        sq r7, 0(r5)
+p1:     cgetpcc r9
+        cincaddri r9, r9, ret1 - p1
+        csealentry r1, r9        # return sentry
+        cinvoke r20, r13, r14    # call: PCC = unsealed code, r20 = unsealed data
+ret1:   cgettype r21, r20        # data stays in r20 for the caller to inspect
+        cgetperm r22, r20
+        cinvoke r20, r14, r13    # code/data swapped: data operand lacks... code has no EXEC -> cap-permission
+        cinvoke r20, r13, r13    # data has EXEC -> cap-permission
+        cinvoke r20, r10, r14    # code unsealed -> cap-sealed
+        cinvoke r20, r13, r11    # data unsealed -> cap-sealed
+        csealentry r15, r10
+        cinvoke r20, r15, r14    # sentry as code -> cap-sealed
+        li r7, 78
+        csetaddr r16, r12, r7
+        cseal r17, r11, r16      # data sealed with otype 78
+        cinvoke r20, r13, r17    # otype mismatch -> cap-sealed
+        cinvoke r20, r6, r14     # untagged code -> cap-tag
+        cinvoke r20, r13, r5     # untagged data -> cap-tag
+        csc r13, 16(r5)
+        csc r14, 32(r5)
+        clc r23, 16(r5)
+        clc r24, 32(r5)
+p2:     cgetpcc r9
+        cincaddri r9, r9, ret2 - p2
+        csealentry r1, r9
+        cinvoke r0, r23, r24     # invoke reloaded pair, rd = r0 (data discarded)
+ret2:   addi r40, r40, 1
+        halt zero
+method: cgetpcc r30
+        cgetlen r31, r30
+        lq r32, 0(r20)           # method sees its data through r20 (unsealed)
+        addi r32, r32, 1
+        sq r32, 0(r20)
+        cgettype r33, r20
+mend:   cjalr r0, r1             # return through the caller's sentry
+""" + handler + DATA
+    # ---------------- v3: clc permission attenuation (read-only authority => loaded caps are read-only)
+    T["clc_attenuate"] = PRE + setup + """
+        li r6, 64
+        csetaddr r10, rc, r5
+        csetbnd r10, r10, r6     # RW data cap (all perms)
+        csc r10, 0(r5)           # spill it
+        li r7, 9                 # LOAD | LOAD_CAP: read-only view that may load capabilities
+        candperm r11, r10, r7
+        clc r12, 0(r11)          # loaded through a read-only view
+        cgetperm r13, r12        # STORE and STORE_CAP gone
+        cgettag r14, r12
+        sq r7, 16(r12)           # -> cap-permission (deep read-only)
+        lq r15, 16(r12)          # loads still fine
+        csc r10, 16(r12)         # -> cap-permission
+        clc r16, 0(r10)          # through the RW view: full permissions kept
+        cgetperm r17, r16
+        clc r18, 0(r5)           # untagged (hybrid) base: unchanged
+        cgetperm r19, r18
+        li r7, 3                 # LOAD | STORE (no LOAD_CAP): tag stripped as before
+        candperm r20, r10, r7
+        clc r21, 0(r20)
+        cgettag r22, r21
+        li r7, 0x60
+        candperm r23, rc, r7
+        li r7, 5
+        csetaddr r23, r23, r7
+        cseal r24, r10, r23
+        csc r24, 32(r5)          # sealed capability spilled
+        clc r25, 32(r11)         # sealed caps are not attenuated (opaque)
+        cunseal r26, r25, r23
+        cgetperm r27, r26
+        li r7, 0x1D              # LOAD|EXEC|LOAD_CAP|STORE_CAP (no STORE)
+        candperm r28, r10, r7
+        clc r29, 0(r28)
+        cgetperm r30, r29        # STORE_CAP also removed
+        clc r31, 0(r11)
+        sq r7, 0(r31)            # load-use of an attenuated cap -> cap-permission
+        candperm r32, r31, r7
+        cgetperm r33, r32
+""" + POST + handler + DATA
     T["seal_hazards"] = PRE + setup + """
         li r6, 7
         csetaddr r11, rc, r6

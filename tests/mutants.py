@@ -37,6 +37,10 @@ MUTANTS = [
     ("mul_pass_drops_carry", "tx_muldiv.sv", "acc_nx = {mstep, acc[127:MUL_BITS]};",
      "acc_nx = {1'b0, mstep[126+MUL_BITS:0], acc[127:MUL_BITS]};"),
     ("mul_last_pass_stale", "tx_muldiv.sv", "c_hi <= acc_nx[255:128];", "c_hi <= acc[255:128];"),
+    ("sentry_link_not_sealed", "tx_core.sv", "a_sentry ? OTYPE_SENTRY : 16'd0", "16'd0"),
+    ("cinvoke_no_otype_match", "tx_core.sv", " || mb[M_OT +: 16] != a_ot)", ")"),
+    ("clc_no_ro_attenuation", "tx_core.sv", "clc_ro   = exmem_ldro &", "clc_ro   = 1'b0 &"),
+    ("pcc_keeps_sentry_seal", "tx_core.sv", "ma_unsealed = {ma[M_TAG], 16'd0, ma[M_OT-1:0]};", "ma_unsealed = ma;"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

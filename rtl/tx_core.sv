@@ -99,7 +99,7 @@ module tx_core #(
   logic [5:0]   idex_rs1, idex_rs2, idex_rd;
   // EX/MEM
   logic         exmem_valid, exmem_we, exmem_load, exmem_store, exmem_trap, exmem_csrr,
-                exmem_csrw, exmem_eret, exmem_halt, exmem_mmio, exmem_clc, exmem_csc, exmem_ldcap;
+                exmem_csrw, exmem_eret, exmem_halt, exmem_mmio, exmem_clc, exmem_csc, exmem_ldcap, exmem_ldro;
   logic [MW-1:0] exmem_smeta, exmem_tmeta;
   logic         exmem_cjalr, exmem_setepcc;
   logic [127:0] exmem_pc, exmem_val, exmem_ea, exmem_sdata, exmem_tval;
@@ -158,7 +158,7 @@ module tx_core #(
                          id_k[K_HALT] | id_k[K_CSRW];
   wire         id_use2 = id_k[K_ALUR] | id_k[K_MD] | id_k[K_SIMD] | id_k[K_CAPR] | id_k[K_STORE] |
                          id_k[K_BR] | (id_k[K_WIDE] & ifid_inst[15]);
-  wire         id_csetepcc = id_k[K_CAPR] & (ifid_inst[27:24] == CF_CSETEPCC);
+  wire         id_csetepcc = id_k[K_CAPR] & (ifid_inst[28:24] == CF_CSETEPCC);
   wire         id_we   = writes_rd(id_k) & (id_fa != 6'd0) & ~ifid_fault & ~id_csetepcc;
 
   // register read with WB write-through
@@ -216,6 +216,10 @@ module tx_core #(
   wire         b_sealed = b_tag & (|mb[M_OT +: 16]);
   wire [127:0] a_base = ma[256:129];
   wire [128:0] a_top  = ma[128:0];
+  wire         a_sentry = a_tag & (a_ot == OTYPE_SENTRY);
+  wire         b_sentry = b_tag & (mb[M_OT +: 16] == OTYPE_SENTRY);
+  wire [MW-1:0] ma_unsealed = {ma[M_TAG], 16'd0, ma[M_OT-1:0]};   // PCC installed by cjalr / cinvoke
+  wire [MW-1:0] mb_unsealed = {mb[M_TAG], 16'd0, mb[M_OT-1:0]};
 
   // ---- ALU
   logic [4:0] alu_fn;
@@ -251,7 +255,7 @@ module tx_core #(
   wire stall_md = idex_valid & ex_k[K_MD] & ~md_ready;
 
   // ---- capabilities
-  logic [3:0]   cap_fn;
+  logic [4:0]   cap_fn;
   logic [127:0] cap_y, cap_x, cap_tv;
   logic [MW-1:0] cap_m;
   logic         cap_fault;
@@ -259,26 +263,26 @@ module tx_core #(
   wire  [128:0] cap_ntop = {1'b0, a} + {1'b0, cap_x};
   wire  [128:0] cap_len  = a_top - {1'b0, a_base};
   always_comb begin
-    cap_fn = ex_k[K_CAPR] ? ex_fn[3:0] : (ex_op == OP_CINCADDRI ? 4'd1 : 4'd2);
+    cap_fn = ex_k[K_CAPR] ? ex_fn[4:0] : (ex_op == OP_CINCADDRI ? 5'd1 : 5'd2);
     cap_x  = ex_k[K_CAPR] ? b : (ex_op == OP_CINCADDRI ? ex_imm : ex_uimm);
     cap_y = '0; cap_m = '0; cap_fault = 1'b0; cap_cause = C_CAP_TAG; cap_tv = a;
     case (cap_fn)
-      4'd0: begin cap_y = cap_x; cap_m = ma; end                     // csetaddr
-      4'd1: begin cap_y = a + cap_x; cap_m = ma; end                 // cincaddr
-      4'd2: begin                                                    // csetbnd
+      5'd0: begin cap_y = cap_x; cap_m = ma; end                     // csetaddr
+      5'd1: begin cap_y = a + cap_x; cap_m = ma; end                 // cincaddr
+      5'd2: begin                                                    // csetbnd
         cap_y = a;
         cap_m = {1'b1, 16'd0, a_perm, a, cap_ntop};
         if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
         else if (a < a_base || cap_ntop > a_top) begin cap_fault = 1'b1; cap_cause = C_CAP_BOUNDS; end
       end
-      4'd3: begin                                                    // candperm
+      5'd3: begin                                                    // candperm
         cap_y = a;
         cap_m = a_tag ? {1'b1, 16'd0, a_perm & cap_x[PW-1:0], a_base, a_top} : '0;
       end
-      4'd4: cap_y = a_base;                                          // cgetbase
-      4'd5: cap_y = cap_len[128] ? {128{1'b1}} : cap_len[127:0];     // cgetlen
-      4'd6: cap_y = {{(128-PW){1'b0}}, a_perm};                                // cgetperm
-      4'd7: cap_y = {127'd0, a_tag};                                 // cgettag
+      5'd4: cap_y = a_base;                                          // cgetbase
+      5'd5: cap_y = cap_len[128] ? {128{1'b1}} : cap_len[127:0];     // cgetlen
+      5'd6: cap_y = {{(128-PW){1'b0}}, a_perm};                                // cgetperm
+      5'd7: cap_y = {127'd0, a_tag};                                 // cgettag
       CF_CGETPCC: begin cap_y = idex_pc; cap_m = pcc_q; end
       CF_CSETEPCC: begin
         cap_m = ma;
@@ -286,10 +290,29 @@ module tx_core #(
         else if (a_sealed) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; end
       end
       CF_CJALR: begin                                                // link = PCC, cursor pc+4
-        cap_y = idex_pc + 128'd4; cap_m = pcc_q;
+        cap_y = idex_pc + 128'd4;                                    // (a sentry link through a sentry)
+        cap_m = {pcc_q[M_TAG], a_sentry ? OTYPE_SENTRY : 16'd0, pcc_q[M_OT-1:0]};
+        if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
+        else if (a_sealed && !a_sentry) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; end
+        else if (!a_perm[2]) begin cap_fault = 1'b1; cap_cause = C_CAP_PERM; end
+      end
+      CF_CSEALENTRY: begin
+        cap_y = a;
+        cap_m = {1'b1, OTYPE_SENTRY, a_perm, a_base, a_top};
         if (!a_tag) begin cap_fault = 1'b1; cap_cause = C_CAP_TAG; end
         else if (a_sealed) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; end
         else if (!a_perm[2]) begin cap_fault = 1'b1; cap_cause = C_CAP_PERM; end
+      end
+      CF_CINVOKE: begin                                              // rs1 = sealed code, rs2 = sealed data
+        cap_y = b; cap_m = mb_unsealed;
+        cap_fault = 1'b1;
+        if (!a_tag) cap_cause = C_CAP_TAG;
+        else if (!b_tag) begin cap_cause = C_CAP_TAG; cap_tv = b; end
+        else if (!a_sealed || a_sentry) cap_cause = C_CAP_SEALED;
+        else if (!b_sealed || b_sentry || mb[M_OT +: 16] != a_ot) begin cap_cause = C_CAP_SEALED; cap_tv = b; end
+        else if (!a_perm[2]) cap_cause = C_CAP_PERM;
+        else if (b_perm[2]) begin cap_cause = C_CAP_PERM; cap_tv = b; end
+        else cap_fault = 1'b0;
       end
       CF_CSEAL, CF_CUNSEAL: begin                                    // rs2 = sealing authority, cursor = otype
         cap_y = a;
@@ -297,11 +320,11 @@ module tx_core #(
         cap_fault = 1'b1; cap_tv = b;
         if (!a_tag) begin cap_cause = C_CAP_TAG; cap_tv = a; end
         else if (!b_tag) cap_cause = C_CAP_TAG;
-        else if ((cap_fn == CF_CSEAL) ? a_sealed : !a_sealed) begin cap_cause = C_CAP_SEALED; cap_tv = a; end
+        else if ((cap_fn == CF_CSEAL) ? a_sealed : (!a_sealed || a_sentry)) begin cap_cause = C_CAP_SEALED; cap_tv = a; end
         else if (b_sealed) cap_cause = C_CAP_SEALED;
         else if (!b_perm[(cap_fn == CF_CSEAL) ? 5 : 6]) cap_cause = C_CAP_PERM;
         else if (b < b_base || {1'b0, b} >= b_top) cap_cause = C_CAP_BOUNDS;
-        else if (cap_fn == CF_CSEAL && (b[15:0] == 16'd0 || |b[127:16])) cap_cause = C_CAP_BOUNDS;
+        else if (cap_fn == CF_CSEAL && (b[15:0] == 16'd0 || b[15:0] == OTYPE_SENTRY || |b[127:16])) cap_cause = C_CAP_BOUNDS;
         else if (cap_fn == CF_CUNSEAL && b != {112'd0, a_ot}) cap_cause = C_CAP_SEALED;
         else cap_fault = 1'b0;
       end
@@ -309,7 +332,7 @@ module tx_core #(
       default: cap_y = a;                                            // cclrtag
     endcase
     // sealed capabilities are immutable: csetaddr / cincaddr / csetbnd / candperm trap
-    if (cap_fn <= 4'd3 && a_sealed) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; cap_tv = a; end
+    if (cap_fn <= 5'd3 && a_sealed) begin cap_fault = 1'b1; cap_cause = C_CAP_SEALED; cap_tv = a; end
   end
 
   // ---- wide immediate
@@ -365,8 +388,9 @@ module tx_core #(
   wire [127:0] br_target = idex_pc + (ex_imm << 2);
   wire [127:0] jalr_tgt  = (a + ex_imm) & ~128'd3;
   wire ex_mispred = ex_k[K_BR] & (br_taken != idex_pred);
-  wire ex_cjalr  = ex_k[K_CAPR] & (ex_fn[3:0] == CF_CJALR);
-  wire ex_setepcc = ex_k[K_CAPR] & (ex_fn[3:0] == CF_CSETEPCC);
+  // cjalr and cinvoke both jump to rs1's cursor and install rs1 (unsealed) as the PCC
+  wire ex_cjalr  = ex_k[K_CAPR] & ((ex_fn[4:0] == CF_CJALR) | (ex_fn[4:0] == CF_CINVOKE));
+  wire ex_setepcc = ex_k[K_CAPR] & (ex_fn[4:0] == CF_CSETEPCC);
   wire ex_redirect = idex_valid & (ex_mispred | ex_k[K_JALR] | (ex_cjalr & ~cap_fault));
   wire [127:0] ex_target = ex_cjalr ? (a & ~128'd3) : ex_k[K_JALR] ? jalr_tgt : (br_taken ? br_target : ex_pc4);
 
@@ -416,6 +440,9 @@ module tx_core #(
   wire [127:0] mmio_word = (exmem_ea[127:4] == MMIO_MTIME[127:4]) ? mtime_q :
                            (exmem_ea[127:4] == MMIO_MTIMECMP[127:4]) ? mtimecmp_q : '0;
   wire [127:0] ld_raw = (exmem_mmio ? mmio_word : dmem_rdata) >> mshift;
+  // clc through a read-only (no STORE) authority: an unsealed loaded capability loses STORE and STORE_CAP
+  wire          clc_ro   = exmem_ldro & (dmem_rmeta[M_OT +: 16] == 16'd0);
+  wire [MW-1:0] clc_meta = clc_ro ? (dmem_rmeta & ~(MW'(7'b0010010) << M_PERM)) : dmem_rmeta;
   logic [127:0] st_mask;
   always_comb
     case (exmem_op)
@@ -479,7 +506,7 @@ module tx_core #(
       else if (!stop_fetch_q) pc_q <= pc_q + 128'd4;
       if (mem_halt | mem_trap_halt) stop_fetch_q <= 1'b1;
       if (mem_redirect)     fpcc_q <= mem_tpcc;
-      else if (ex_redirect & ex_cjalr) fpcc_q <= ma;
+      else if (ex_redirect & ex_cjalr) fpcc_q <= ma_unsealed;
       // architectural PCC / EPCC (MEM stage)
       if (mem_trap) begin epcc_q <= pcc_q; pcc_q <= ROOT_META; end
       else if (mem_eret) pcc_q <= epcc_q;
@@ -524,12 +551,13 @@ module tx_core #(
         exmem_mmio  <= in_mmio;
         exmem_sdata <= b;
         exmem_smeta <= mb;
-        exmem_tmeta <= ma;
+        exmem_tmeta <= ma_unsealed;              // csetepcc: rs1 is unsealed anyway
         exmem_cjalr <= ex_cjalr & ~ex_trap;
         exmem_setepcc <= ex_setepcc & ~ex_trap;
         exmem_clc   <= is_clc;
         exmem_csc   <= is_csc;
         exmem_ldcap <= ~a_tag | a_perm[3];               // LOAD_CAP (or unchecked base)
+        exmem_ldro  <= a_tag & ~a_perm[1];               // read-only authority: clc result loses STORE/STORE_CAP
         exmem_trap  <= ex_trap;
         exmem_cause <= ex_cause;
         exmem_tval  <= ex_tval;
@@ -575,7 +603,7 @@ module tx_core #(
       memwb_rd    <= exmem_rd;
       memwb_we    <= exmem_we & ~exmem_trap & ~mem_irq;
       memwb_val   <= exmem_load ? ld_val : (exmem_csrr ? csr_rd : exmem_val);
-      memwb_meta  <= exmem_load ? ((exmem_clc & ~exmem_mmio & exmem_ldcap & dmem_rmeta[M_TAG]) ? dmem_rmeta : '0)
+      memwb_meta  <= exmem_load ? ((exmem_clc & ~exmem_mmio & exmem_ldcap & dmem_rmeta[M_TAG]) ? clc_meta : '0)
                                 : (exmem_csrr ? '0 : exmem_meta);
       memwb_trap  <= exmem_trap | mem_irq;
       memwb_cause <= mem_irq ? IRQ_TIMER : exmem_cause;
