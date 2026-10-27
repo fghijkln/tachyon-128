@@ -295,7 +295,11 @@ class Emitter:
         self.spill_base = out_area + local
         self.save_base = self.spill_base + 16 * alloc.nspill
         self.saves = saves + ([1] if self.has_call else [])
-        va = 128 if fg.fn.va_save else 0
+        self.pc = getattr(fg, "pc", False)
+        # purecap + bounded stack: a variadic function keeps its bounded va capability in a 16-byte slot
+        # below the 128-byte save area (built in the prologue from the caller's stack-argument byte count)
+        self.vacap = self.pc and getattr(fg, "stackb", False) and fg.fn.va_save
+        va = (144 if self.vacap else 128) if fg.fn.va_save else 0
         self.frame = self.save_base + 16 * len(self.saves) + va
         self.frame = (self.frame + 15) // 16 * 16
         self.long_branches = len(code) > 6000
@@ -368,6 +372,13 @@ class Emitter:
             self.addi(SP, SP, -self.frame)
         for k, r in enumerate(self.saves):
             self.mem("sq", r, SP, self.save_base + 16 * k)
+        if self.vacap:
+            # va capability = [save area, incoming sp + stack-argument bytes); the caller put that byte
+            # count in SCR_D (r62) right before the call and nothing above has touched r62 yet
+            self.addi(SCR_A, SP, self.frame - 128)
+            self.e(f"addi {rn(SCR_D)}, {rn(SCR_D)}, 128")
+            self.e(f"csetbnd {rn(SCR_A)}, {rn(SCR_A)}, {rn(SCR_D)}")
+            self.mem("sq", SCR_A, SP, self.frame - 144)
         for i in self.code:
             getattr(self, "i_" + i.op)(i)
         return self.out
@@ -426,7 +437,10 @@ class Emitter:
 
     def i_faddr(self, i):
         d, slot = self.dst(i.d)
-        if i.sym == "INCOMING":
+        if i.sym == "INCOMING" and self.vacap:     # va_start: cursor into the bounded va capability
+            self.mem("lq", d, SP, self.frame - 144)
+            self.addi(d, d, i.imm + 128)
+        elif i.sym == "INCOMING":
             self.addi(d, SP, self.frame + i.imm)
         elif self.pc and i.sz:        # bounded to the frame object [start, start + size)
             self.addi(d, SP, self.local_base + i.extra)
@@ -506,10 +520,12 @@ class Emitter:
         self.mem(STORES[i.sz], v, b, off)
 
     def i_call(self, i):
+        t = None if i.sym else self.src(i.a, SCR_A)
+        if i.extra == "va":           # purecap: stack-argument bytes for the variadic callee's va bounds
+            self.e(f"li {rn(SCR_D)}, {i.imm}")
         if i.sym:
             self.e(f"call {i.sym}")
         else:
-            t = self.src(i.a, SCR_A)
             self.e(f"jalr ra, {rn(t)}, 0")
 
     def i_jt(self, i):

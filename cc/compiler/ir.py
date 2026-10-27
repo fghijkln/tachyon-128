@@ -108,6 +108,7 @@ class FuncGen:
         self.slots = []         # (offset, size) of every frame object, for capability bounds
         from .driver import pc_feature
         self.subobj = self.pc and pc_feature("subobject")   # &s.field / s.arr narrowed to the member
+        self.stackb = self.pc and pc_feature("stack")       # bounded stack region + va_list bounds
 
     # --------------------------------------------------------- helpers
     def vreg(self):
@@ -1011,7 +1012,11 @@ class FuncGen:
         for i, a in enumerate(args[:NARGREG]):
             self.mov(A0 + i, a)
         self.has_call = True
-        self.emit("call", a=target, sym=sym, nargs=min(len(args), NARGREG))
+        va = self.pc and self.stackb and (fty.variadic or fty.params is None)
+        # purecap: a (possibly) variadic callee bounds its va_list to the arguments actually passed;
+        # the caller tells it how many stack-argument bytes there are (cc/ABI.md section 8.1)
+        self.emit("call", a=target, sym=sym, nargs=min(len(args), NARGREG),
+                  imm=16 * nstack if va else None, extra="va" if va else None)
         if fty.ret.is_void():
             return ZERO
         r = self.vreg()

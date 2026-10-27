@@ -1,0 +1,6 @@
+sum of 3: 6, sum of 7: 28, sum of 10 (2 on the stack): 55
+printf still works: 100%
+over-read: 
+*** capability trap (hardware): cause=3 <A>
+
+---exit 131

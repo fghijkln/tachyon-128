@@ -4,7 +4,11 @@
 
 extern char _end[];           /* end of the program image (emitted by the tcc128 linker) */
 static char *heap_cur;
+#ifdef __PURECAP__
+#define STACK_RESERVE 0x10000  /* purecap: the stack capability covers exactly [RAM_TOP - 64 KiB, RAM_TOP) */
+#else
 #define STACK_RESERVE 0x4000   /* keep 16 KiB below the initial stack pointer free */
+#endif
 #define RAM_TOP 0x40000
 
 /* purecap: heap_cur is an unbounded RAM capability (from _end); malloc returns a capability bounded

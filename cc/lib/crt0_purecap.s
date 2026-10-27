@@ -1,6 +1,6 @@
 # tcc128 start-up code for -mpurecap (see cc/ABI.md section 8)
 #   gp = RAM capability [0, 256 KiB), no EXEC/SEAL/UNSEAL/CINVOKE: every data pointer descends from it
-#   sp = gp with cursor at the top of RAM (stack objects get their own bounds when their address is taken)
+#   sp = stack capability [RAM_TOP - 64 KiB, RAM_TOP) with cursor at the top (stack objects get their own bounds when their address is taken)
 #   __cap_relocs: initialised pointer slots in static data are rebuilt as bounded capabilities
 #   user mode with ubase = ubound = 0: untagged (integer-address) accesses trap with cause 9
 #   ___tx_mmio = capability for the MMIO page (console, exit, hexout, mtime)
@@ -11,6 +11,13 @@ _start: li   t0, 0x40000
         li   t1, 0x59B            # PERM_ALL & ~(EXEC | SEAL | UNSEAL | PERMIT_CINVOKE)
         candperm gp, gp, t1
         csetaddr sp, gp, t0
+# >>stack (removed by the linker under -fno-stack-bounds)
+        li   t1, 0x30000          # stack capability = [RAM_TOP - 64 KiB, RAM_TOP): a stack overflow
+        csetaddr sp, gp, t1       # traps (cause 3) instead of running into the heap or globals, and no
+        li   t2, 0x10000          # stack-derived pointer can reach memory outside the stack
+        csetbnd sp, sp, t2
+        csetaddr sp, sp, t0
+# <<stack
         la   t2, __tx_trap
         csrw tvec, t2
         la   t0, __cap_relocs
