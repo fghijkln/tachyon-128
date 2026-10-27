@@ -107,6 +107,8 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
                 code = opt.hoist_constants(opt.optimize(code))
                 if opt.enabled("licm"):
                     code = opt.optimize(opt.hoist_invariants(code))
+                if opt.enabled("sr"):
+                    code = opt.optimize(opt.strength_reduce(code))
                 code = opt.fuse_word_ops(opt.schedule_loads(code))
             else:
                 code = opt.jump_cleanup(code)

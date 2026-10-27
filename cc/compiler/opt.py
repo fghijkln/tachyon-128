@@ -862,6 +862,174 @@ def redundant_loads(code):
     return code
 
 
+SR_MAX = 4        # strength-reduced values per loop (each costs a register and an add)
+
+
+def _loops(code):
+    """Single-entry loops (back edge t -> header label h, no label in h..t targeted from outside),
+    smallest first."""
+    label_pos = {i.label: k for k, i in enumerate(code) if i.op == "label"}
+    refs = {}
+    for k, i in enumerate(code):
+        if i.op in ("br", "bcc"):
+            refs.setdefault(i.label, []).append(k)
+        elif i.op == "jt":
+            for l in i.extra:
+                refs.setdefault(l, []).append(k)
+    loops = []
+    for t, i in enumerate(code):
+        if i.op in ("br", "bcc") and i.label in label_pos and label_pos[i.label] < t:
+            h = label_pos[i.label]
+            if not any(code[k].op == "label" and any(not (h <= r <= t) for r in refs.get(code[k].label, []))
+                       for k in range(h, t + 1)):
+                loops.append((t - h, h, t))
+    loops.sort()
+    return loops
+
+
+def fresh_vregs(code):
+    """A fresh-vreg allocator above every register the code mentions."""
+    nv = [VREG0]
+    for i in code:
+        for r in (i.d, i.a, i.b):
+            if isinstance(r, int) and r >= nv[0]:
+                nv[0] = r + 1
+
+    def vreg():
+        nv[0] += 1
+        return nv[0] - 1
+    return vreg
+
+
+def strength_reduce(code, vreg=None):
+    """v6 loop strength reduction: in a single-entry loop with an induction variable i stepped by
+    a constant (`i = i + c`, or `t = i + c; i = sext32(t)` for signed int, whose overflow is UB),
+    a single-definition address-like value v = B + i*S (built from `sll i,k` / `mul i,R` /
+    `add x,inv`, B and R loop-invariant) is kept in a new register p: p = v(i) is computed in
+    the preheader, `p += c*S` follows i's step, and v's definition becomes `mov v, p`.
+    Default (non-purecap) code only.  vreg() allocates a fresh virtual register."""
+    if PURECAP:
+        return code
+    vreg = vreg or fresh_vregs(code)
+    done = set()
+    while True:
+        dc = def_counts(code)
+        target = None
+        for _, h, t in _loops(code):
+            if code[h].label in done:
+                continue
+            done.add(code[h].label)
+            written = {}
+            for k in range(h, t + 1):
+                for d in code[k].defs():
+                    if d is not None:
+                        written.setdefault(d, []).append(k)
+            # induction variables: iv -> (step c, position of its in-loop definition)
+            ivs = {}
+            for iv, pos in written.items():
+                if iv < VREG0 or len(pos) != 1:
+                    continue
+                i = code[pos[0]]
+                if i.op == "bin" and i.cc == "add" and i.a == iv and i.b is None and i.imm is not None:
+                    ivs[iv] = (sx(i.imm), pos[0])
+                elif i.op == "ext" and i.sign and i.sz == 32 and dc.get(i.a) == 1 and len(written.get(i.a, [])) == 1:
+                    j = code[written[i.a][0]]
+                    if j.op == "bin" and j.cc == "add" and j.a == iv and j.b is None and j.imm is not None \
+                            and written[i.a][0] < pos[0]:
+                        ivs[iv] = (sx(j.imm), pos[0])
+            if not ivs:
+                continue
+
+            def inv(r):
+                return r is not None and (r == ZERO or (r >= VREG0 and r not in written))
+
+            aff = {}       # v -> (iv, scale: ('c', n) | ('r', R), def position)
+            for k in range(h, t + 1):
+                i = code[k]
+                if i.op != "bin" or i.d is None or i.d < VREG0 or dc.get(i.d) != 1:
+                    continue
+                if i.cc == "sll" and i.b is None and i.a in ivs and 0 <= (i.imm & 127) < 64:
+                    aff[i.d] = (i.a, ("c", 1 << (i.imm & 127)), k)
+                elif i.cc == "mul" and i.b is not None and ((i.a in ivs and inv(i.b)) or (i.b in ivs and inv(i.a))):
+                    iv, r = (i.a, i.b) if i.a in ivs else (i.b, i.a)
+                    aff[i.d] = (iv, ("r", r), k)
+                elif i.cc == "add" and i.b is not None:
+                    for x, y in ((i.a, i.b), (i.b, i.a)):
+                        if inv(y) and (x in aff or x in ivs):
+                            if x in aff:
+                                aff[i.d] = (aff[x][0], aff[x][1], k)
+                            else:
+                                aff[i.d] = (x, ("c", 1), k)
+                            break
+            if not aff:
+                continue
+            # reduce the affine values read by something other than the affine chain itself
+            chain_users = {}
+            for k in range(h, t + 1):
+                i = code[k]
+                for u in i.uses():
+                    if u in aff:
+                        chain_users.setdefault(u, set()).add(i.d in aff and code[aff[i.d][2]] is i)
+            outside = set()
+            for k, i in enumerate(code):
+                if not (h <= k <= t):
+                    for u in i.uses():
+                        if u in aff:
+                            outside.add(u)
+            pick = [v for v in aff if False in chain_users.get(v, set()) or v in outside]
+            # only worth it when the chain has a mul, or more than one op to replace
+            def cost(v):
+                i = code[aff[v][2]]
+                c = 1
+                for u in i.uses():
+                    if u in aff:
+                        c += cost(u)
+                return c
+            pick = [v for v in pick if aff[v][1][0] == "r" or cost(v) >= 2][:SR_MAX]
+            if pick:
+                target = (h, t, ivs, aff, pick)
+                break
+        if target is None:
+            return code
+        h, t, ivs, aff, pick = target
+        pre = []
+        after = {}            # position -> instructions to insert after it
+        repl = {}
+        for v in pick:
+            iv, scale, _ = aff[v]
+            c, ivpos = ivs[iv]
+            memo = {}
+
+            def build(r):     # recompute r = f(iv) in the preheader
+                if r == iv or r not in aff:
+                    return r
+                if r in memo:
+                    return memo[r]
+                i = code[aff[r][2]]
+                n = vreg()
+                pre.append(Ins("bin", d=n, a=build(i.a), b=build(i.b) if i.b is not None else None,
+                               imm=i.imm, cc=i.cc))
+                memo[r] = n
+                return n
+            p = vreg()
+            pre.append(Ins("mov", d=p, a=build(v)))
+            if scale[0] == "c":
+                step = Ins("bin", d=p, a=p, imm=(c * scale[1]) & M128, cc="add")
+            elif c == 1:
+                step = Ins("bin", d=p, a=p, b=scale[1], cc="add")
+            else:
+                s = vreg()
+                pre.append(Ins("bin", d=s, a=scale[1], imm=c & M128, cc="mul"))
+                step = Ins("bin", d=p, a=p, b=s, cc="add")
+            after.setdefault(ivpos, []).append(step)
+            repl[aff[v][2]] = Ins("mov", d=v, a=p)
+        body = []
+        for k in range(h, t + 1):
+            body.append(repl.get(k, code[k]))
+            body.extend(after.get(k, []))
+        code[:] = code[:h] + pre + body + code[t + 1:]
+
+
 CSE_OPS = {"bin", "ext", "li", "la", "faddr"}
 
 
