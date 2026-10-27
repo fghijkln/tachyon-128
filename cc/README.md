@@ -43,6 +43,13 @@ dead-function elimination).
   `addwu`/`subwu`/`mulwu`/`sllwu` for `unsigned`) instead of the operation plus a `slli`/`srai` pair
   (`opt.fuse_word_ops`, run last; `sll` by a register and `div` only fuse when the C operation itself is
   32-bit); any remaining 32-bit sign/zero extension is a single `sext.w`/`zext.w`
+* **v5 inlining** (`compiler/inline.py`, disable with `-fno-inline`): calls to small static
+  functions in the same unit (≤ 40 IR instructions, ≤ 8 scalar parameters, scalar/void return, not
+  variadic, not directly recursive, no jump tables) are spliced into the caller before optimisation —
+  callee vregs and labels renamed, callee frame objects moved into a slot of the caller's frame,
+  arguments and the return value passed directly instead of through `a0`–`a7` — so the caller's
+  optimiser sees through them; callees inline bottom-up (nested), and a static function whose every
+  call was inlined disappears at link time
 * register allocation: values that are *live* across a call (exact liveness, not interval
   overlap) get callee-saved registers, everything else caller-saved; short-lived values that
   only feed / come from an argument register are allocated directly in `a0`–`a7`, so the copies
@@ -95,9 +102,9 @@ staples, and `tx128.h` (MMIO console, cycle/instret counters, `tx_put_u128`/`tx_
 
 | suite | command | result |
 |---|---|---|
-| C tests (`cc/tests/c`, reference output from host gcc) | `python3 cc/tests/run_tests.py --both` | 85 programs × {`-O`, `-O0`} = 170/170 |
+| C tests (`cc/tests/c`, reference output from host gcc) | `python3 cc/tests/run_tests.py --both` | 86 programs × {`-O`, `-O0`} = 172/172 |
 | differential fuzzing (random UB-free programs, `randprog.py`) | `python3 cc/tests/fuzz.py N [SEED] [-O0]` | see below |
-| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 92/92 (`-O`), 92/92 (`-O0`) |
+| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 93/93 (`-O`), 93/93 (`-O0`) |
 | benchmarks (golden + RTL, commit-trace checked) | `python3 cc/bench/run_bench.py [--rtl] [--both] [--purecap]` | 6/6 |
 
 `gen_expected.py` regenerates `cc/tests/expected/*.out` with the host compiler
@@ -109,6 +116,7 @@ The fuzzer generates csmith-style programs over all 12 integer types (incl. `__i
 bit-field structs, pointers, helper functions with stack-passed arguments and loops, and prints
 every global at exit; output and exit code must match host gcc exactly. Failing programs are
 saved in `cc/tests/fuzz_failures/`.
+Latest runs: 500/500 at `-O` with inlining (seeds 1001–1500); 200/200 at `-O0` (v5 stage 1).
 
 ## Benchmarks (`cc/bench`)
 
@@ -117,15 +125,26 @@ run is also checked commit-by-commit against the golden model. `-O`:
 
 | benchmark | what | retired | cycles | CPI | image |
 |---|---|---:|---:|---:|---:|
-| fib | recursive `fib(20)` | 372,986 | 395,591 | 1.061 | 2.8 KB |
-| sieve | Byte sieve, 8190 flags × 3 | 430,393 | 471,447 | 1.095 | 10.8 KB |
-| qsort | quicksort of 2000 ints + checksum | 345,340 | 441,851 | 1.279 | 11.0 KB |
-| dhrystone | Dhrystone-like (records, strings, enums) | 316,298 | 392,389 | 1.241 | 15.1 KB |
-| coremark_lite | list/matrix/state-machine/CRC kernels | 286,704 | 397,861 | 1.388 | 7.6 KB |
-| int128 | 128-bit factorial, mul/div/mod | 66,362 | 171,545 | 2.585 | 3.6 KB |
+| fib | recursive `fib(20)` | 372,851 | 395,465 | 1.061 | 3.6 KB |
+| sieve | Byte sieve, 8190 flags × 3 | 430,285 | 471,347 | 1.095 | 11.6 KB |
+| qsort | quicksort of 2000 ints + checksum | 344,836 | 441,403 | 1.280 | 11.8 KB |
+| dhrystone | Dhrystone-like (records, strings, enums) | 284,996 | 353,651 | 1.241 | 15.8 KB |
+| coremark_lite | list/matrix/state-machine/CRC kernels | 281,681 | 393,223 | 1.396 | 8.5 KB |
+| int128 | 128-bit factorial, mul/div/mod | 46,404 | 151,473 | 3.264 | 4.3 KB |
 
-(after v5 word ops; earlier numbers in `results_baseline.json` / `results_opt.json` /
-`results_word.json`.)
+(v5 word ops + inlining, `results_inline.json`; earlier numbers in `results_baseline.json` /
+`results_opt.json` / `results_word.json`.) Effect of inlining (RTL cycles, `-fno-inline` → default):
+
+| benchmark | no inlining | inlining | change | call sites inlined |
+|---|---:|---:|---:|---|
+| fib | 395,591 | 395,465 | −0.03% | libc only (`fib` itself is recursive) |
+| sieve | 471,447 | 471,347 | −0.02% | libc only |
+| qsort | 441,851 | 441,403 | −0.10% | libc only |
+| dhrystone | 392,389 | 353,651 | **−9.9% (1.11×)** | 10 (`Func_1`, `Func_3`, `Proc_2..7`) |
+| coremark_lite | 397,861 | 393,223 | −1.2% | 8 (`crc16` ×6, `list_find`, `list_reverse`) |
+| int128 | 171,545 | 151,473 | **−11.7% (1.13×)** | 6 (`mulmod` ×3, `powmod`, `put` ×2) |
+
+Images grow by 0.5–1 KB, mostly from libc's static helpers inlined into `printf`.
 
 `int128` is dominated by the iterative multiplier/divider; `coremark_lite` and `dhrystone` by
 data-dependent branches and load-use pairs.
@@ -134,7 +153,7 @@ data-dependent branches and load-use pairs.
 
 ```sh
 python3 cc/tcc128.py prog.c -mpurecap --run           # every pointer a bounded capability
-python3 cc/tests/run_tests.py --purecap [--rtl]       # 85 C tests + 7 capability-fault tests
+python3 cc/tests/run_tests.py --purecap [--rtl]       # 86 C tests + 7 capability-fault tests
 python3 cc/tests/fuzz.py 200 2001 -mpurecap [-O0]
 python3 cc/bench/run_bench.py --rtl --purecap
 ```
@@ -160,13 +179,13 @@ the trap handler prints the cause and faulting address, exit code 128 + cause):
 | 006_forged_pointer | dereference a pointer rebuilt from its integer address | cause 9 (untagged access in user mode) |
 | 007_use_after_bounds | write `arr[-1]` (underflow) | cause 3 |
 
-Results: `run_tests.py --purecap` **92/92 at `-O` and 92/92 at `-O0`** — all 85 normal C tests pass
+Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** — all 86 normal C tests pass
 unmodified in purecap mode (none excluded) plus the 7 fault tests; every purecap test also matches the
 RTL model commit-by-commit (`--rtl`). The runner additionally audits the golden model and fails a test
 on any RAM access through an untagged base (none occur). Purecap fuzzing: 350/350 at `-O`
 (seeds 2001–2350) and 200/200 at `-O0` (seeds 2001–2200).
 
-Overhead (`-O`, RTL cycles, `results_purecap.json`):
+Overhead (`-O` without inlining, as measured for stage 2, RTL cycles, `results_purecap.json`):
 
 | benchmark | default | purecap | overhead | image |
 |---|---:|---:|---:|---:|
@@ -176,6 +195,10 @@ Overhead (`-O`, RTL cycles, `results_purecap.json`):
 | dhrystone | 392,389 | 405,978 | +3.46% | +848 B |
 | coremark_lite | 397,861 | 397,880 | +0.005% | +640 B |
 | int128 | 171,545 | 172,331 | +0.46% | +512 B |
+
+With inlining on both sides (`results_purecap_inline.json`): fib 395,585 (+0.03%), sieve 471,456
+(+0.02%), qsort 441,692 (+0.07%), dhrystone 363,336 (+2.7%), coremark_lite 392,748 (−0.1%), int128
+152,206 (+0.5%). Purecap fuzzing with inlining: 100/100 (seeds 2351–2450).
 
 The overhead is small because the data model does not change (pointers are already 128 bits) and the
 capability instructions are single-cycle ALU ops; the cost is the `csetbnd` at each address-taking
@@ -191,6 +214,7 @@ site and the bounded `la` sequence for globals (dhrystone takes many global/reco
 * Brace elision in initialisers is supported only for the simple cases.
 * `long long` is 64-bit (LP64 compatibility); 128-bit arithmetic needs `__int128`.
 * One compilation per invocation produces a whole linked program (no separate object files).
-* The optimiser is intra-procedural and simple: no inlining, no global value numbering, no loop
+* The optimiser is simple: inlining only of small static functions in the same unit (no
+  cross-unit or heuristic/profile-driven inlining), no global value numbering, no loop
   induction-variable strength reduction. (v5: 32-bit `int` arithmetic uses the ISA's word ops;
   8/16-bit types still re-normalise with a shift pair.)

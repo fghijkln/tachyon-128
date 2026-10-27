@@ -14,6 +14,9 @@ python3 cc/tests/run_tests.py --purecap               # purecap suite + capabili
 
 `-mpurecap` compiles every pointer as a bounded capability (stack objects, globals, string literals,
 `malloc` blocks) and runs `main` in user mode with an empty untagged window, so buffer overflows,
-writes through read-only views and dereferences of forged pointers trap in hardware. All 85 C tests
-pass in purecap mode (92/92 with the 7 fault tests, `-O` and `-O0`); benchmark overhead is +0.005% to
+writes through read-only views and dereferences of forged pointers trap in hardware. All 86 C tests
+pass in purecap mode (93/93 with the 7 fault tests, `-O` and `-O0`); benchmark overhead is +0.005% to
 +3.5% cycles. See `cc/README.md` and `cc/ABI.md` §8.
+
+`-O` also inlines small static functions (`cc/compiler/inline.py`; `-fno-inline` turns it off):
+dhrystone −9.9% and int128 −11.7% RTL cycles, coremark-lite −1.2%; 172/172 C tests, fuzz 500/500.
