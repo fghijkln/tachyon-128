@@ -104,7 +104,7 @@ staples, and `tx128.h` (MMIO console, cycle/instret counters, `tx_put_u128`/`tx_
 |---|---|---|
 | C tests (`cc/tests/c`, reference output from host gcc) | `python3 cc/tests/run_tests.py --both` | 86 programs × {`-O`, `-O0`} = 172/172 |
 | differential fuzzing (random UB-free programs, `randprog.py`) | `python3 cc/tests/fuzz.py N [SEED] [-O0]` | see below |
-| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 96/96 (`-O`), 96/96 (`-O0`) |
+| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 103/103 (`-O`), 103/103 (`-O0`) |
 | benchmarks (golden + RTL, commit-trace checked) | `python3 cc/bench/run_bench.py [--rtl] [--both] [--purecap]` | 6/6 |
 
 `gen_expected.py` regenerates `cc/tests/expected/*.out` with the host compiler
@@ -181,13 +181,13 @@ the trap handler prints the cause and faulting address, exit code 128 + cause):
 | 008_subobject_overflow | copy 10 bytes into an 8-byte member array (would overwrite the next field) | cause 3 |
 | 009_va_overread | `va_arg` past the arguments actually passed (9 claimed, 2 passed) | cause 3 |
 | 010_stack_exhaustion | unbounded recursion reaches the bottom of the 128 KiB stack region | cause 3 |
-| 040_sentry_ok | function pointers in locals, static tables, vtables, heap, `memcpy`, struct copies, varargs, `uintptr_t`, `qsort` — all sentries, all callable | no trap |
-| 041_sentry_offset | `(char *)fp + 4` (skip into the function body) | cause 7 (sealed) |
-| 042_sentry_deref | read the code through a function pointer cast to `unsigned *` | cause 7 |
-| 043_sentry_write | patch the code through a function pointer | cause 7 |
-| 044_sentry_forged | call a function pointer rebuilt from its integer address | cause 2 (tag) |
-| 045_sentry_data_call | call a data buffer cast to a function pointer ("shellcode") | cause 4 (no EXEC) |
-| 046_sentry_modify | `__builtin_cheri_address_set` on a sentry stored in a struct | cause 7 |
+| 011_sentry_ok | function pointers in locals, static tables, vtables, heap, `memcpy`, struct copies, varargs, `uintptr_t`, `qsort` — all sentries, all callable | no trap |
+| 012_sentry_offset | `(char *)fp + 4` (skip into the function body) | cause 7 (sealed) |
+| 013_sentry_deref | read the code through a function pointer cast to `unsigned *` | cause 7 |
+| 014_sentry_write | patch the code through a function pointer | cause 7 |
+| 015_sentry_forged | call a function pointer rebuilt from its integer address | cause 2 (tag) |
+| 016_sentry_data_call | call a data buffer cast to a function pointer ("shellcode") | cause 4 (no EXEC) |
+| 017_sentry_modify | `__builtin_cheri_address_set` on a sentry stored in a struct | cause 7 |
 
 Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** — all 86 normal C tests pass
 unmodified in purecap mode (none excluded) plus the 7 fault tests; every purecap test also matches the
@@ -245,7 +245,7 @@ used by the test scripts). Exact rules: [`ABI.md`](ABI.md) §8.1.
   re-bounded, read or written through (cause 7); calling a pointer rebuilt from an integer traps with cause 2,
   calling a data pointer with cause 4. `__builtin_cheri_type_get(p)` returns the otype (`0xFFFF` = sentry).
   Sentries keep the whole-image PCC bounds (direct `jal` calls need them); returns stay `ret`. Tests:
-  `purecap/040_sentry_ok` (legitimate uses, no trap) and `041`–`046` below.
+  `purecap/011_sentry_ok` (legitimate uses, no trap) and `012`–`017` below.
 
 ## Limitations
 

@@ -209,7 +209,7 @@ pointer is a *sealed entry capability* (`SPEC.md` §5.1.4, otype `0xFFFF`):
 * **Moves.** Function pointers are copied with `cmove` (CAP func 18), which copies sealed capabilities exactly;
   memory copies (`memcpy`, struct assignment, `qsort` swaps, varargs) use `clc`/`csc` and keep the seal too.
   `uintptr_t` holds the sealed capability unchanged; casting to a narrower integer keeps only the address.
-* **What traps** (fault tests `041`–`046`, `040` = legitimate uses): offsetting a function pointer (`(char *)fp + 4`) or retargeting it
+* **What traps** (fault tests `012`–`017`, `011` = legitimate uses): offsetting a function pointer (`(char *)fp + 4`) or retargeting it
   with `__builtin_cheri_address_set` / re-bounding it — modification of a sealed capability, cause 7; loading
   or storing through it as if it were data — dereference of a sealed capability, cause 7; calling a function
   pointer rebuilt from an integer — `cjalr` of an untagged value, cause 2; calling a data pointer cast to a
