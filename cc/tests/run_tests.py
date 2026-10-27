@@ -84,7 +84,8 @@ def main():
                     out, code, _, _ = run_one(f, opt, purecap=True)
                     open(exp_path, "w").write(placeholders(fmt_result(out, code)))
             elif a.purecap and os.path.exists(exp_path + ".purecap"):
-                exp_path += ".purecap"      # output that legitimately differs under -mpurecap
+                exp_path += ".purecap"      # output that legitimately differs under -mpurecap (e.g. a trap)
+                pc_test = True              # compared with address placeholders like the fault tests
             if not os.path.exists(exp_path):
                 print(f"SKIP {name} (no expected output)")
                 continue

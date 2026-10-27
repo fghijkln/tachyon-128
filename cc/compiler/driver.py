@@ -21,6 +21,17 @@ def inline_enabled():
     return os.environ.get("TCC128_NO_INLINE", "") in ("", "0")
 
 
+PC_FEATURES = ("subobject",)   # purecap hardening, each on by default; -fno-<feature> / TCC128_NO_<FEATURE>=1 turns it off
+
+
+def pc_feature(name):
+    return os.environ.get("TCC128_NO_" + name.upper(), "") in ("", "0")
+
+
+def feature_key():
+    return "".join(".no" + f for f in PC_FEATURES if not pc_feature(f))
+
+
 SYM_RE = re.compile(r"\b(_[A-Za-z0-9_]+)\b")
 
 
@@ -151,7 +162,7 @@ def libc_units(include_paths=(), optimize=True, purecap=False):
     hdr = max([os.path.getmtime(os.path.join(INCLUDE_DIR, f)) for f in os.listdir(INCLUDE_DIR)] + [0])
     for k, f in enumerate(srcs):
         path = os.path.join(LIB_DIR, f)
-        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + (".pc" if purecap else "") + ("" if inline_enabled() else ".noinl") + ".pkl")
+        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + (".pc" if purecap else "") + ("" if inline_enabled() else ".noinl") + (feature_key() if purecap else "") + ".pkl")
         if os.path.exists(cache) and os.path.getmtime(cache) > max(os.path.getmtime(path), newest_compiler, hdr):
             with open(cache, "rb") as fh:
                 units.append(pickle.load(fh))

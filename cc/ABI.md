@@ -151,6 +151,17 @@ a tagged capability and every memory access goes through one:
   `length_get(p)`, `base_get(p)`, `perms_get(p)`.
 * **Faults**: `tvec = __tx_trap` prints `*** capability trap (hardware): cause=N <tval>` and exits
   with `128 + cause` (3 = bounds, 4 = permission, 9 = untagged access in user mode).
-* **Not covered**: sub-object bounds (a member array is bounded by its enclosing object), the stack
-  pointer itself spans all RAM (only address-taken objects are bounded), no temporal safety (`free`
-  does not revoke), code pointers are bounded to the whole code image, not the function.
+* **Hardening** (v6, §8.1): sub-object bounds.
+
+### 8.1 Purecap hardening (v6)
+
+**Sub-object bounds** (default; `-fno-subobject-bounds` / `TCC128_NO_SUBOBJECT=1` turns it off).
+The address of a struct/union member — `&s.m`, `&p->m`, `&s.a.b`, and a member *array* used as a
+value (array-to-pointer decay of `s.arr`) — is the enclosing object's capability narrowed with
+`csetbnd(i)` to `[member, member + sizeof member)`. Exceptions: a member of size 0 (flexible array
+member) keeps the enclosing bounds; an expression rooted at an integer constant (`&((T *)0)->m`, the
+`offsetof` macro) is not a capability and is not narrowed; `s.arr[k]` with a constant `k` inside the
+array is addressed directly from the enclosing object (no `csetbnd`, it cannot go out of bounds).
+Consequences: indexing a member array out of range traps (cause 3) even when the access would land
+inside the enclosing struct, and `container_of` (stepping back from a member pointer to the struct)
+traps; code that needs it is compiled with `-fno-subobject-bounds`.

@@ -104,7 +104,7 @@ staples, and `tx128.h` (MMIO console, cycle/instret counters, `tx_put_u128`/`tx_
 |---|---|---|
 | C tests (`cc/tests/c`, reference output from host gcc) | `python3 cc/tests/run_tests.py --both` | 86 programs × {`-O`, `-O0`} = 172/172 |
 | differential fuzzing (random UB-free programs, `randprog.py`) | `python3 cc/tests/fuzz.py N [SEED] [-O0]` | see below |
-| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 93/93 (`-O`), 93/93 (`-O0`) |
+| purecap C tests + capability-fault tests | `python3 cc/tests/run_tests.py --purecap [-O0] [--rtl]` | 94/94 (`-O`), 94/94 (`-O0`) |
 | benchmarks (golden + RTL, commit-trace checked) | `python3 cc/bench/run_bench.py [--rtl] [--both] [--purecap]` | 6/6 |
 
 `gen_expected.py` regenerates `cc/tests/expected/*.out` with the host compiler
@@ -178,6 +178,7 @@ the trap handler prints the cause and faulting address, exit code 128 + cause):
 | 005_provenance | out-of-bounds cursor keeps its tag, int arithmetic clears it, `memcpy`/`qsort` keep tags | no trap |
 | 006_forged_pointer | dereference a pointer rebuilt from its integer address | cause 9 (untagged access in user mode) |
 | 007_use_after_bounds | write `arr[-1]` (underflow) | cause 3 |
+| 008_subobject_overflow | copy 10 bytes into an 8-byte member array (would overwrite the next field) | cause 3 |
 
 Results: `run_tests.py --purecap` **93/93 at `-O` and 93/93 at `-O0`** — all 86 normal C tests pass
 unmodified in purecap mode (none excluded) plus the 7 fault tests; every purecap test also matches the
@@ -204,13 +205,27 @@ The overhead is small because the data model does not change (pointers are alrea
 capability instructions are single-cycle ALU ops; the cost is the `csetbnd` at each address-taking
 site and the bounded `la` sequence for globals (dhrystone takes many global/record addresses).
 
+### Purecap hardening (v6)
+
+Each is on by default under `-mpurecap` and has an opt-out flag (also an environment variable, as
+used by the test scripts). Exact rules: [`ABI.md`](ABI.md) §8.1.
+
+* **Sub-object bounds** (`-fno-subobject-bounds` / `TCC128_NO_SUBOBJECT=1`): `&s.field`, `&p->m`
+  and a member array that decays to a pointer (`s.name`, `p->buf`) are narrowed with `csetbnd(i)` to
+  the member itself, so overflowing a member array into the next field traps (cause 3) instead of
+  corrupting it. Not narrowed: flexible array members (`char data[]`, bounded by the allocation), the
+  `offsetof` idiom `&((T *)0)->m` (an integer, not a capability) and constant in-bounds indexing
+  `s.arr[3]` (statically safe, so no `csetbnd` is emitted). `container_of`-style code that steps back
+  from a member to its enclosing struct now traps; `073_ptr_arith_struct` does exactly that, so its
+  purecap expectation (`cc/tests/expected/073_ptr_arith_struct.out.purecap`) is the cause-3 trap, and
+  it passes unchanged with `-fno-subobject-bounds`. Test: `purecap/008_subobject_overflow`.
+
 ## Limitations
 
 * No floating point (`float`/`double` are rejected), no `long double`, no complex.
 * No variable-length arrays, no `alloca`, no `setjmp`/`longjmp`; `_Thread_local` is accepted and ignored (single-threaded).
 * Pointers are plain integers in the default (hybrid) mode; `-mpurecap` makes them capabilities but has
-  no sub-object bounds, no temporal safety (`free` does not revoke) and an all-RAM stack capability
-  (only address-taken stack objects are bounded).
+  the v6 hardening limits are listed in "Purecap hardening (v6)" above.
 * Brace elision in initialisers is supported only for the simple cases.
 * `long long` is 64-bit (LP64 compatibility); 128-bit arithmetic needs `__int128`.
 * One compilation per invocation produces a whole linked program (no separate object files).

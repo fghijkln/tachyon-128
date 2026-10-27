@@ -1,5 +1,6 @@
-/* -mpurecap: one field's capability cannot reach its neighbour; a struct member array is bounded by the
-   enclosing object (sub-object bounds are not narrowed), but writing below a local array traps (cause 3) */
+/* -mpurecap: one field's capability cannot reach its neighbour; with sub-object bounds (default) a struct
+   member array decays to a capability of exactly the member (8 bytes, not the 12-byte record), and writing
+   below a local array traps (cause 3) */
 #include <stdio.h>
 #include <string.h>
 #include <tx128.h>

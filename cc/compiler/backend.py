@@ -276,7 +276,7 @@ LOADS = {(1, True): "lb", (2, True): "lh", (4, True): "lw", (8, True): "ld", (16
 STORES = {1: "sb", 2: "sh", 4: "sw", 8: "sd", 16: "sq"}
 IMM_FORM = {"add": "addi", "and": "andi", "or": "ori", "xor": "xori", "slt": "slti", "sltu": "sltiu",
             "sll": "slli", "srl": "srli", "sra": "srai",
-            "addw": "addiw", "addwu": "addiwu", "sllw": "slliw", "sllwu": "slliwu", "cadd": "cincaddri"}
+            "addw": "addiw", "addwu": "addiwu", "sllw": "slliw", "sllwu": "slliwu", "cadd": "cincaddri", "csetbnd": "csetbndi"}
 CAP_UNARY_OPS = {"cgettag", "cgetlen", "cgetbase", "cgetperm"}
 PC_MEM = {"lq": "clc", "sq": "csc"}      # purecap: every 16-byte access moves the tag too
 BR = {"eq": "beq", "ne": "bne", "lt": "blt", "ge": "bge", "ltu": "bltu", "geu": "bgeu"}

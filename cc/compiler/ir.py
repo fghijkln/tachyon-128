@@ -106,6 +106,8 @@ class FuncGen:
         self.data = []          # extra data (jump tables)
         self.pc = getattr(unit, "purecap", False)   # -mpurecap: pointers are capabilities
         self.slots = []         # (offset, size) of every frame object, for capability bounds
+        from .driver import pc_feature
+        self.subobj = self.pc and pc_feature("subobject")   # &s.field / s.arr narrowed to the member
 
     # --------------------------------------------------------- helpers
     def vreg(self):
@@ -160,6 +162,22 @@ class FuncGen:
 
     def paddi(self, p, imm):
         return self.bini("cadd" if self.pc else "add", p, imm)
+
+    def narrow(self, r, size):
+        """Sub-object bounds: a capability to a struct member is bounded to the member itself."""
+        if not self.subobj or size <= 0:
+            return r          # size 0: flexible array member, keeps the enclosing object's bounds
+        return self.bini("csetbnd", r, size)
+
+    @staticmethod
+    def null_based(n):
+        """&((T *)0)->m (the offsetof idiom) is an integer, not a capability: never narrowed."""
+        while n.kind in ("member", "deref", "cast", "add", "sub", "addr"):
+            n = n.lhs
+        return n.kind == "num"
+
+    def is_member_array(self, n):
+        return n.kind == "member" and n.ty.is_array() and n.ty.size > 0 and not self.null_based(n)
 
     def faddr(self, d, off):
         """Address of frame offset off; purecap bounds it to the frame object containing off."""
@@ -531,6 +549,10 @@ class FuncGen:
                 off = wrap(p.rhs.val, T.INT128)
                 if p.kind == "sub":
                     off = -off
+                if self.subobj and self.is_member_array(p.lhs) and 0 <= off <= p.lhs.ty.size - n.ty.size:
+                    lv = self.lval(p.lhs)       # constant in-bounds index: statically safe, no csetbnd
+                    if lv.kind == "mem" and fits14(lv.off + off + 16):
+                        return LV("mem", lv.reg, lv.off + off)
                 base = self.expr(p.lhs)
                 if fits14(off):
                     return LV("mem", base, off)
@@ -699,7 +721,10 @@ class FuncGen:
         return self.load(self.lval(n), n.ty)
 
     e_deref = e_var
-    e_member = e_var
+
+    def e_member(self, n):
+        r = self.load(self.lval(n), n.ty)
+        return self.narrow(r, n.ty.size) if self.is_member_array(n) else r   # array decay
 
     def e_cliteral(self, n):
         return self.load(self.lval(n), n.ty)
@@ -713,6 +738,8 @@ class FuncGen:
         lv = self.lval(e)
         if lv.kind == "reg":
             error_at(n.tok, "internal: address of register variable")
+        if e.kind == "member" and not self.null_based(e):
+            return self.narrow(self.addr_reg(lv), e.ty.size)
         return self.addr_reg(lv)
 
     def e_cast(self, n):

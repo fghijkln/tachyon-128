@@ -1,0 +1,9 @@
+bob 100 len(name)=8 len(&s.balance)=8 len(&s.in)=8 len(&s.in.b)=4
+offsetof(balance)=8 offsetof(in.b)=20
+5 hello len(data)=64
+&s.in.a[0]=1
+overflowing s.name into s.balance at <A>
+
+*** capability trap (hardware): cause=3 <A>
+
+---exit 131

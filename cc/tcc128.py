@@ -4,7 +4,7 @@
   tcc128.py prog.c [more.c ...] -o prog.s       compile + link to one assembly file
   tcc128.py prog.c --run                        ... then assemble and run on the golden simulator
   tcc128.py prog.c --run --rtl                  ... and on the Verilator RTL model (build/vtb/Vtb)
-Options: -I dir, -D name[=val], -O0 (no IR optimisation), -mpurecap (capability pointers), -fno-inline, --nolibc, --max N (instruction limit),
+Options: -I dir, -D name[=val], -O0 (no IR optimisation), -mpurecap (capability pointers), -fno-inline, -fno-subobject-bounds, --nolibc, --max N (instruction limit),
          --bin out.bin, --hex out.hex, --stats.
 """
 import argparse
@@ -71,6 +71,8 @@ def main():
     ap.add_argument("-O", dest="Olevel", default=None)
     ap.add_argument("--nolibc", action="store_true")
     ap.add_argument("-fno-inline", dest="noinline", action="store_true", help="do not inline small static functions")
+    ap.add_argument("-fno-subobject-bounds", dest="nosubobj", action="store_true",
+                    help="-mpurecap: keep the enclosing object's bounds for &s.field / s.arr")
     ap.add_argument("-mpurecap", dest="purecap", action="store_true",
                     help="pure-capability code: every pointer is a bounded capability (cc/ABI.md section 8)")
     ap.add_argument("--run", action="store_true")
@@ -86,6 +88,8 @@ def main():
         defines[k] = v if v else "1"
     if a.noinline:
         os.environ["TCC128_NO_INLINE"] = "1"
+    if a.nosubobj:
+        os.environ["TCC128_NO_SUBOBJECT"] = "1"
     try:
         asm_text = compile_files(a.files, a.inc, defines, not a.O0, a.nolibc, a.purecap)
     except CompileError as e:
