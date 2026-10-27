@@ -1,8 +1,6 @@
 """Register allocation (linear scan over liveness-derived intervals) and TACHYON-128
 assembly emission."""
-import bisect
-
-from .ir import A0, FRAME, INCOMING, SP, VREG0, ZERO, fits14
+from .ir import A0, FRAME, INCOMING, NARGREG, SP, VREG0, ZERO, fits14
 
 CALLER_SAVED = list(range(12, 28)) + list(range(54, 59))     # t0-t15, t16-t20
 CALLEE_SAVED = list(range(28, 54))                            # s0-s15, s16-s25
@@ -137,8 +135,27 @@ def allocate(code):
         for v in bits_of(b.live_out):
             touch(v + VREG0, b.end)
     calls = [k for k, i in enumerate(code) if i.op == "call"]
+    # vregs actually live across some call (precise, unlike the interval test): only these
+    # need a callee-saved register; values merely spanning a call inside a lifetime hole
+    # can live in caller-saved registers.
+    across = 0
+    block_of = [0] * len(code)
+    for bn, b in enumerate(blocks):
+        live = b.live_out
+        for k in range(b.end, b.start - 1, -1):
+            block_of[k] = bn
+            i = code[k]
+            for d in i.defs():
+                if d >= VREG0:
+                    live &= ~(1 << (d - VREG0))
+            if i.op == "call":
+                across |= live
+            for u in i.uses():
+                if u is not None and u >= VREG0:
+                    live |= 1 << (u - VREG0)
     intervals = sorted(start, key=lambda v: (start[v], end[v]))
     alloc = Allocation()
+    fixed = argreg_coalesce(code, start, end, block_of, calls)
     free_caller = list(CALLER_SAVED)
     free_callee = list(CALLEE_SAVED)
     active = []   # (end, vreg)
@@ -148,12 +165,13 @@ def allocate(code):
             hint.setdefault(i.d, i.a)
 
     def crosses(v):
-        s, e = start[v], end[v]
-        j = bisect.bisect_right(calls, s)
-        return j < len(calls) and calls[j] < e
+        return bool(across >> (v - VREG0) & 1)
 
     nspill = 0
     for v in intervals:
+        if v in fixed:
+            alloc.reg[v] = fixed[v]
+            continue
         s = start[v]
         # expire
         keep = []
@@ -200,6 +218,57 @@ def allocate(code):
         active.append((end[v], v))
     alloc.nspill = nspill
     return alloc
+
+
+def phys_refs(i):
+    """Physical argument registers read / written by an IR instruction (incl. implicit)."""
+    rd = [u for u in i.uses() if u is not None and A0 <= u < A0 + NARGREG]
+    wr = [d for d in i.defs() if A0 <= d < A0 + NARGREG]
+    if i.op == "call":
+        rd += [A0 + k for k in range(i.nargs)]
+        wr += list(range(A0, A0 + NARGREG))
+    elif i.op == "ret":
+        rd.append(A0)
+    return rd, wr
+
+
+def argreg_coalesce(code, start, end, block_of, calls):
+    """Give a vreg the argument register it is copied to / from when its whole lifetime sits in
+    one basic block, contains no call, and that register is untouched meanwhile:
+      v = ...; ...; mov aK, v      (v dies at the mov)        -> v lives in aK
+      mov v, aK; ...                (v born from aK)          -> v lives in aK
+    A call inside the checked range writes every argument register, so it disqualifies too.
+    The copy then disappears in the emitter."""
+    fixed = {}
+    taken = {}   # phys -> list of (s, e)
+    for k, i in enumerate(code):
+        if i.op != "mov" or i.d is None or i.a is None:
+            continue
+        if A0 <= i.d < A0 + NARGREG and i.a >= VREG0 and end.get(i.a) == k:
+            v, p = i.a, i.d
+            s, e = start[v], k
+            lo, hi = s, e          # p must be untouched in [s, e)
+        elif A0 <= i.a < A0 + NARGREG and i.d >= VREG0 and start.get(i.d) == k:
+            v, p = i.d, i.a
+            s, e = k, end[v]
+            lo, hi = s + 1, e + 1  # p must be untouched in (s, e]
+        else:
+            continue
+        if v in fixed or block_of[s] != block_of[e]:
+            continue
+        bad = False
+        for j in range(lo, hi):
+            rd, wr = phys_refs(code[j])
+            if p in rd or p in wr:
+                bad = True
+                break
+        if bad:
+            continue
+        if any(not (e < ts or te < s) for ts, te in taken.get(p, [])):
+            continue
+        fixed[v] = p
+        taken.setdefault(p, []).append((s, e))
+    return fixed
 
 
 LOADS = {(1, True): "lb", (2, True): "lh", (4, True): "lw", (8, True): "ld", (16, True): "lq",

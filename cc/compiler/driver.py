@@ -56,7 +56,7 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
             fg = ir.FuncGen(o, unit).gen()
             code = fg.code
             if optimize:
-                code = opt.optimize(code)
+                code = opt.hoist_constants(opt.optimize(opt.local_cse(opt.optimize(code))))
             else:
                 code = opt.jump_cleanup(code)
             alloc = backend.allocate(code)

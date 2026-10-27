@@ -400,3 +400,102 @@ def demanded_bits(code):
             code[k] = Ins("mov", d=i.d, a=i.a)
             did = True
     return did
+
+
+def hoist_constants(code):
+    """Loop-invariant constant hoisting: single-definition `li`/`la` temporaries inside a loop
+    move to just before the loop header, and identical constants in one loop share one vreg.
+    A loop is a backward branch at t to a label at h whose labels [h, t] are entered only from
+    inside [h, t] (plus fall-through into h), so the inserted code dominates the whole loop."""
+    changed = True
+    rounds = 0
+    while changed and rounds < 500:
+        changed = False
+        rounds += 1
+        label_pos = {i.label: k for k, i in enumerate(code) if i.op == "label"}
+        refs = {}
+        for k, i in enumerate(code):
+            if i.op in ("br", "bcc"):
+                refs.setdefault(i.label, []).append(k)
+            elif i.op == "jt":
+                for l in i.extra:
+                    refs.setdefault(l, []).append(k)
+        loops = []
+        for t, i in enumerate(code):
+            if i.op in ("br", "bcc") and i.label in label_pos and label_pos[i.label] < t:
+                loops.append((t - label_pos[i.label], label_pos[i.label], t))
+        loops.sort()
+        dc = def_counts(code)
+        for _, h, t in loops:
+            ok = True
+            for k in range(h, t + 1):
+                if code[k].op == "label" and any(not (h <= r <= t) for r in refs.get(code[k].label, [])):
+                    ok = False
+                    break
+            if not ok:
+                continue
+            first = {}
+            rename = {}
+            hoist = []
+            for k in range(h, t + 1):
+                i = code[k]
+                if i.op in ("li", "la") and i.d is not None and i.d >= VREG0 and dc.get(i.d) == 1:
+                    key = (i.op, i.imm, i.sym)
+                    if key in first:
+                        rename[i.d] = first[key]
+                    else:
+                        first[key] = i.d
+                        hoist.append(i)
+                    code[k] = None
+            if not hoist:
+                continue
+            body = [i for i in code[h:t + 1] if i is not None]
+            code[:] = code[:h] + hoist + body + code[t + 1:]
+            if rename:
+                for i in code:
+                    if i.a in rename:
+                        i.a = rename[i.a]
+                    if i.b in rename:
+                        i.b = rename[i.b]
+            changed = True
+            break     # positions moved: recompute loops
+    return code
+
+
+CSE_OPS = {"bin", "ext", "li", "la", "faddr"}
+
+
+def local_cse(code):
+    """Block-local common-subexpression elimination over pure ops. Only single-definition
+    vregs take part, so the surviving definition dominates every use of the removed one and
+    its uses can simply be renamed."""
+    dc = def_counts(code)
+    rename = {}
+    avail = {}
+    out = []
+    for i in code:
+        if i.op == "label" or i.op in ("br", "bcc", "ret", "jt", "call"):
+            avail = {}
+        if i.a in rename:
+            i.a = rename[i.a]
+        if i.b in rename:
+            i.b = rename[i.b]
+        if i.op in CSE_OPS and i.d is not None and i.d >= VREG0 and dc.get(i.d) == 1:
+            key = (i.op, i.cc, i.a, i.b, i.imm, i.sym, i.sz, i.sign)
+            if key in avail:
+                rename[i.d] = avail[key]
+                continue
+            avail[key] = i.d
+        if i.op == "call":
+            avail = {}
+        for d in i.defs():
+            # a multiply-defined (or physical) register changed: drop expressions reading it
+            if d is not None and (d < VREG0 or dc.get(d, 0) != 1):
+                avail = {k: v for k, v in avail.items() if d not in (k[2], k[3])}
+        out.append(i)
+    for i in out:     # uses reached around a loop back edge precede the def textually
+        if i.a in rename:
+            i.a = rename[i.a]
+        if i.b in rename:
+            i.b = rename[i.b]
+    return out
