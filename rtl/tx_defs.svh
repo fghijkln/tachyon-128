@@ -3,6 +3,9 @@ localparam logic [5:0] OP_ALU = 6'h01, OP_MULDIV = 6'h02, OP_SIMD = 6'h03, OP_CA
 localparam logic [5:0] OP_ADDI = 6'h08, OP_ANDI = 6'h09, OP_ORI = 6'h0A, OP_XORI = 6'h0B,
                        OP_SLTI = 6'h0C, OP_SLTIU = 6'h0D, OP_SLLI = 6'h0E, OP_SRLI = 6'h0F,
                        OP_SRAI = 6'h10, OP_CINCADDRI = 6'h11, OP_CSETBNDI = 6'h12, OP_WIDE = 6'h14;
+// v5 32-bit word immediates
+localparam logic [5:0] OP_ADDIW = 6'h13, OP_SLLIW = 6'h15, OP_SRLIW = 6'h16, OP_SRAIW = 6'h17,
+                       OP_ADDIWU = 6'h06, OP_SLLIWU = 6'h07;
 localparam logic [5:0] OP_LB = 6'h18, OP_LH = 6'h19, OP_LW = 6'h1A, OP_LD = 6'h1B, OP_LQ = 6'h1C,
                        OP_LBU = 6'h1D, OP_LHU = 6'h1E, OP_LWU = 6'h1F, OP_LDU = 6'h20, OP_CLC = 6'h21;
 localparam logic [5:0] OP_SB = 6'h28, OP_SH = 6'h29, OP_SW = 6'h2A, OP_SD = 6'h2B, OP_SQ = 6'h2C, OP_CSC = 6'h2D;
@@ -11,7 +14,7 @@ localparam logic [5:0] OP_BEQ = 6'h30, OP_BNE = 6'h31, OP_BLT = 6'h32, OP_BGE = 
 localparam logic [5:0] OP_JAL = 6'h38, OP_JALR = 6'h39, OP_ECALL = 6'h3B, OP_HALT = 6'h3C, OP_CSRR = 6'h3D,
                        OP_CSRW = 6'h3E, OP_ERET = 6'h3F;
 
-localparam logic [7:0] N_ALU = 8'd19, N_MULDIV = 8'd6, N_CAP = 8'd18, N_AMO = 8'd7;
+localparam logic [7:0] N_ALU = 8'd27, N_MULDIV = 8'd10, N_CAP = 8'd18, N_AMO = 8'd7;
 // v4 atomics (func8 of OP_AMO)
 localparam logic [2:0] AMO_LR = 3'd0, AMO_SC = 3'd1, AMO_SWAP = 3'd2, AMO_ADD = 3'd3, AMO_AND = 3'd4,
                        AMO_OR = 3'd5, AMO_XOR = 3'd6;
@@ -26,7 +29,12 @@ localparam logic [4:0] SIMD_VMUL = 5'd13;
 // ALU function codes
 localparam logic [4:0] A_ADD = 0, A_SUB = 1, A_AND = 2, A_OR = 3, A_XOR = 4, A_SLL = 5, A_SRL = 6,
                        A_SRA = 7, A_SLT = 8, A_SLTU = 9, A_MIN = 10, A_MAX = 11, A_MINU = 12,
-                       A_MAXU = 13, A_ANDN = 14, A_SEQ = 15, A_CLZ = 16, A_CTZ = 17, A_POPCNT = 18;
+                       A_MAXU = 13, A_ANDN = 14, A_SEQ = 15, A_CLZ = 16, A_CTZ = 17, A_POPCNT = 18,
+                       // v5 word ops (32-bit result, sign-extended; ...WU zero-extended)
+                       A_ADDW = 19, A_SUBW = 20, A_SLLW = 21, A_SRLW = 22, A_SRAW = 23,
+                       A_ADDWU = 24, A_SUBWU = 25, A_SLLWU = 26;
+// v5 MULDIV word functions
+localparam logic [7:0] MD_MULW = 8'd6, MD_MULWU = 8'd7, MD_DIVW = 8'd8, MD_REMW = 8'd9;
 
 // trap causes
 localparam logic [3:0] C_ILLEGAL = 1, C_CAP_TAG = 2, C_CAP_BOUNDS = 3, C_CAP_PERM = 4,

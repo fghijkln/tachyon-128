@@ -254,6 +254,9 @@ class Machine:
             if func >= len(ALU_FUNCS):
                 raise Trap(CAUSE_ILLEGAL, w)
             fn = ALU_FUNCS[func]
+            if fn.endswith(("w", "wu")):            # v5 word ops
+                wrote = self.rd_write(rd, word_op(fn, x1, x2))
+                fn = None
             s1, s2 = to_signed(x1), to_signed(x2)
             sh = x2 & 127
             r = {
@@ -264,8 +267,9 @@ class Machine:
                 "minu": lambda: min(x1, x2), "maxu": lambda: max(x1, x2), "andn": lambda: x1 & ~x2,
                 "seq": lambda: int(x1 == x2), "clz": lambda: clz(x1), "ctz": lambda: ctz(x1),
                 "popcnt": lambda: bin(x1).count("1"),
-            }[fn]()
-            wrote = self.rd_write(rd, r)
+            }[fn]() if fn else None
+            if fn:
+                wrote = self.rd_write(rd, r)
         elif op == OP_MULDIV:
             if func >= len(MULDIV_FUNCS):
                 raise Trap(CAUSE_ILLEGAL, w)
@@ -274,6 +278,10 @@ class Machine:
                 r = x1 * x2
             elif fn == "mulhu":
                 r = (x1 * x2) >> 128
+            elif fn in ("mulw", "mulwu"):              # v5: low 32 bits of the product, extended
+                r = wext(x1 * x2, fn == "mulwu")
+            elif fn in ("divw", "remw"):               # v5: signed 32-bit operands, sign-extended result
+                r = wext(divs(wext(x1) & MASK, wext(x2) & MASK, True, fn == "remw"))
             else:
                 r = divs(x1, x2, fn in ("div", "rem"), fn.startswith("rem"))
             wrote = self.rd_write(rd, r)
@@ -370,6 +378,11 @@ class Machine:
                 wrote = self.rd_write(rd, x1 >> sh)
             elif op == OP_SRAI:
                 wrote = self.rd_write(rd, s1 >> sh)
+            elif op in (OP_ADDIW, OP_ADDIWU):          # v5 word immediates
+                wrote = self.rd_write(rd, wext(x1 + imm, op == OP_ADDIWU))
+            elif op in (OP_SLLIW, OP_SRLIW, OP_SRAIW, OP_SLLIWU):
+                fn = {OP_SLLIW: "sllw", OP_SRLIW: "srlw", OP_SRAIW: "sraw", OP_SLLIWU: "sllwu"}[op]
+                wrote = self.rd_write(rd, word_op(fn, x1, f["uimm14"]))
             elif op == OP_CINCADDRI:
                 wrote = self.cap_op("cincaddr", rd, rs1, ui)
             elif op == OP_CSETBNDI:

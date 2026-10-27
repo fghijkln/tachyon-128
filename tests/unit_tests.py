@@ -48,6 +48,7 @@ def rtype_test(mn, unary, seed, n=14):
 # Branch/return prediction is invisible to the ISA, so these bounds are what lets the suite (and the
 # mutation check) notice a predictor that silently stopped working.
 PERF_MAX = {
+    "word_mulw_chain": 100,     # v5: 88 cycles, mulw is one multiplier pass (4-pass mul: ~148)
     "ras_nested": 412,          # v4 RAS: 403 cycles (430 without RAS)
     "ras_recursive": 6700,      # 6611 (7314 without RAS)
     "ras_sites": 176,           # 169 (220 without RAS)
@@ -88,6 +89,44 @@ def tests():
         divu r25, r8, r7
         mul r26, r4, r9
 """ + POST
+    # v5 32-bit word ops: overflow wrap, sign/zero extension, shift-amount masking, divw corners,
+    # mulw (one multiplier pass) next to full multiplies on the same operands (result cache kinds)
+    wv = [0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0x1_0000_0001, 0xDEADBEEF_7FFFFFFF, M, 1 << 127, 0x12345678]
+    body = []
+    for k, (x, y) in enumerate([(a_, b_) for a_ in wv for b_ in wv][::3]):
+        body.append(f"        li r4, {x}\n        li r5, {y}")
+        for j, mn in enumerate(["addw", "subw", "sllw", "srlw", "sraw", "addwu", "subwu", "sllwu"]):
+            body.append(f"        {mn} r{20 + j}, r4, r5")
+    T["word_alu_corners"] = PRE + "\n".join(body) + "\n" + POST
+    T["word_md_corners"] = PRE + f"""
+        li r4, 0x80000000
+        li r5, -1
+        divw r10, r4, r5         # INT_MIN / -1 -> INT_MIN
+        remw r11, r4, r5         # -> 0
+        li r6, 0x1_00000000      # low word 0: divide by zero
+        divw r12, r4, r6
+        remw r13, r4, r6
+        li r7, 0xFFFF_FFF9       # -7 as a word (upper bits ignored)
+        li r8, 0x5_00000002
+        divw r14, r7, r8
+        remw r15, r7, r8
+        div r16, r7, r8          # full-width ops on the same registers must not hit a word result
+        mulw r17, r7, r8
+        mulwu r18, r7, r8
+        mul r19, r7, r8          # full product after mulw: must not reuse the 1-pass value
+        mulw r20, r7, r8
+        mulhu r21, r7, r8
+        li r9, 0xFFFFFFFF
+        mulw r22, r9, r9         # (-1)*(-1) = 1
+        mulwu r23, r4, r4        # 2^62 -> low word 0
+        li r12, 0x7FFFFFFF
+        mulw r24, r12, r12
+        mulw r25, r24, r12       # dependent chain
+        divw r26, r25, r12
+        remw r27, r25, r7
+""" + POST
+    T["word_mulw_chain"] = PRE + "        li r4, 3\n        li r5, 0x10001\n" + \
+        "".join(f"        mulw r4, r4, r5\n        addiw r4, r4, {k}\n" for k in range(20)) + POST
     # divider early-termination edges: |a| and |b| of every relative width (n odd/even, 0, 1, 128)
     r = random.Random(77)
     widths = [1, 2, 3, 4, 7, 8, 63, 64, 65, 126, 127, 128]
@@ -131,7 +170,9 @@ def tests():
     # ---------------- immediate ALU
     for i, (mn, rng_) in enumerate([("addi", (-8192, 8191)), ("andi", (-8192, 8191)), ("ori", (-8192, 8191)),
                                     ("xori", (-8192, 8191)), ("slti", (-8192, 8191)), ("sltiu", (-8192, 8191)),
-                                    ("slli", (0, 127)), ("srli", (0, 127)), ("srai", (0, 127))]):
+                                    ("slli", (0, 127)), ("srli", (0, 127)), ("srai", (0, 127)),
+                                    ("addiw", (-8192, 8191)), ("addiwu", (-8192, 8191)), ("slliw", (0, 31)),
+                                    ("srliw", (0, 31)), ("sraiw", (0, 31)), ("slliwu", (0, 31))]):
         r = random.Random(400 + i)
         body = []
         for k in range(12):

@@ -63,8 +63,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest", "perm4", "amo"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 4])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw", "cinvoke", "user", "bpat", "call", "vmulx", "nest", "perm4", "amo", "word"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 4, 4])[0]
         if not allow_ctrl and k in ("br", "loop", "jal", "cjalr", "cinvoke", "user", "bpat", "call", "nest"):
             k = "alu"
         if k == "alu":
@@ -91,7 +91,8 @@ class Gen:
             self.emit(f"{f} r{d}, r{a}, r{b}")
             if r.random() < 0.4:       # partner op on same operands (result cache)
                 partner = {"mul": "mulhu", "mulhu": "mul", "div": "rem", "rem": "div",
-                           "divu": "remu", "remu": "divu"}[f]
+                           "divu": "remu", "remu": "divu", "mulw": "mul", "mulwu": "mulw",
+                           "divw": "remw", "remw": "div"}[f]
                 if d not in (a, b):
                     self.emit(f"{partner} r{self.dst()}, r{a}, r{b}")
         elif k == "divw":           # divider early termination: operands of chosen significant widths
@@ -375,6 +376,28 @@ class Gen:
                 self.emit("csrw status, r51")
             if r.random() < 0.3:                    # read the timer registers
                 self.emit(f"{r.choice(['lq', 'ld', 'lw', 'lbu'])} r{self.dst()}, {r.choice([0x30, 0x40])}(r52)")
+        elif k == "word":           # v5 32-bit word ops on word-edge operands, dependent chains, imm forms
+            edge = [0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, M, 1 << 31 | 1 << 100, r.getrandbits(32)]
+            ra, rb = self.dst(), self.dst()
+            if ra == rb or 0 in (ra, rb):
+                return
+            self.emit(f"li r{ra}, {r.choice(edge + [self.val()])}")
+            self.emit(f"li r{rb}, {r.choice(edge + [r.randint(0, 40), self.val()])}")
+            src = ra
+            for _ in range(r.randint(1, 4)):
+                d = self.dst()
+                c = r.random()
+                if c < 0.45:
+                    f = r.choice(["addw", "subw", "sllw", "srlw", "sraw", "addwu", "subwu", "sllwu"])
+                    self.emit(f"{f} r{d}, r{src}, r{rb}")
+                elif c < 0.75:
+                    f = r.choice(["addiw", "addiwu", "slliw", "srliw", "sraiw", "slliwu"])
+                    imm = r.randint(0, 31) if "l" in f[1:] or "ra" in f else r.choice([-1, 1, -8192, 8191, r.randint(-8192, 8191)])
+                    self.emit(f"{f} r{d}, r{src}, {imm}")
+                else:
+                    self.emit(f"{r.choice(['mulw', 'mulwu', 'divw', 'remw', 'mul', 'div'])} r{d}, r{src}, r{rb}")
+                if d:
+                    src = d
         elif k == "ill":
             self.emit(f".word 0x{r.choice([0, 0xff000001, 0x37000003, 0x00000007, 0x0080003d]):08x}")
 

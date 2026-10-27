@@ -29,6 +29,10 @@ OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI 
 OP_CINCADDRI = 0x11
 OP_CSETBNDI = 0x12
 OP_WIDE = 0x14     # K-type wide immediate: wli / wins
+# v5 32-bit word immediates (RV64 'W' style): operate on the low 32 bits, result sign-extended
+# (addiwu / slliwu: zero-extended) to 128 bits
+OP_ADDIW, OP_SLLIW, OP_SRLIW, OP_SRAIW = 0x13, 0x15, 0x16, 0x17
+OP_ADDIWU, OP_SLLIWU = 0x06, 0x07
 
 OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU = range(0x18, 0x21)
 OP_CLC = 0x21      # clc rd, imm(rs1): 128-bit capability load (tag + metadata from shadow memory)
@@ -45,9 +49,12 @@ OP_ERET = 0x3F
 
 # ---------------------------------------------------------------- function codes
 ALU_FUNCS = ["add", "sub", "and", "or", "xor", "sll", "srl", "sra", "slt", "sltu",
-             "min", "max", "minu", "maxu", "andn", "seq", "clz", "ctz", "popcnt"]
+             "min", "max", "minu", "maxu", "andn", "seq", "clz", "ctz", "popcnt",
+             # v5 word ops: 32-bit result, sign-extended ("...wu": zero-extended); shifts use rs2[4:0]
+             "addw", "subw", "sllw", "srlw", "sraw", "addwu", "subwu", "sllwu"]
 ALU_UNARY = {"clz", "ctz", "popcnt"}
-MULDIV_FUNCS = ["mul", "mulhu", "div", "divu", "rem", "remu"]
+MULDIV_FUNCS = ["mul", "mulhu", "div", "divu", "rem", "remu",
+                "mulw", "mulwu", "divw", "remw"]          # v5 word ops (divw/remw: signed 32-bit operands)
 SIMD_FUNCS = ["vadd", "vsub", "vaddss", "vaddus", "vsubss", "vsubus", "vmins", "vminu",
               "vmaxs", "vmaxu", "vcmpeq", "vcmpgts", "vcmpgtu", "vmul", "vsplat", "vsum",
               "vsll", "vsrl", "vsra"]
@@ -66,7 +73,27 @@ CAP_RS1_ONLY = {"csetepcc"}                                                   # 
 
 I_OPS = {"addi": OP_ADDI, "andi": OP_ANDI, "ori": OP_ORI, "xori": OP_XORI, "slti": OP_SLTI,
          "sltiu": OP_SLTIU, "slli": OP_SLLI, "srli": OP_SRLI, "srai": OP_SRAI,
-         "cincaddri": OP_CINCADDRI, "csetbndi": OP_CSETBNDI}
+         "cincaddri": OP_CINCADDRI, "csetbndi": OP_CSETBNDI,
+         "addiw": OP_ADDIW, "slliw": OP_SLLIW, "srliw": OP_SRLIW, "sraiw": OP_SRAIW,
+         "addiwu": OP_ADDIWU, "slliwu": OP_SLLIWU}
+SHIFT_I = {"slli", "srli", "srai"}                       # shift amount uimm14 & 127
+SHIFT_IW = {"slliw", "srliw", "sraiw", "slliwu"}          # shift amount uimm14 & 31
+
+
+def wext(v, unsigned=False):
+    """v5 word-op result: low 32 bits sign- (or zero-) extended to 128 bits."""
+    v &= 0xFFFFFFFF
+    return v if unsigned or not v >> 31 else v | (MASK ^ 0xFFFFFFFF)
+
+
+def word_op(fn, x1, x2):
+    """Golden semantics of the 32-bit word ALU ops (x2 is rs2 or the immediate)."""
+    a = x1 & 0xFFFFFFFF
+    sh = x2 & 31
+    base = fn.rstrip("u") if fn.endswith("wu") else fn
+    r = {"addw": lambda: a + x2, "subw": lambda: a - x2, "sllw": lambda: a << sh,
+         "srlw": lambda: a >> sh, "sraw": lambda: sext(a, 32) >> sh}[base]()
+    return wext(r, fn.endswith("wu"))
 LOAD_OPS = {"lb": (OP_LB, 1, True), "lh": (OP_LH, 2, True), "lw": (OP_LW, 4, True),
             "ld": (OP_LD, 8, True), "lq": (OP_LQ, 16, False), "lbu": (OP_LBU, 1, False),
             "lhu": (OP_LHU, 2, False), "lwu": (OP_LWU, 4, False), "ldu": (OP_LDU, 8, False)}

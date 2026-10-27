@@ -88,6 +88,17 @@ MUTANTS = [
     ("cgetepcc_user_allowed", "tx_core.sv", "ex_setepcc | ex_getepcc;", "ex_setepcc;"),
     ("cgetepcc_no_interlock", "tx_core.sv", " ||   // AMO results come from MEM\n                    (idex_inst[5:0] == OP_CAP && idex_inst[28:24] == CF_CGETEPCC));",
      ");"),
+    # ---- v5 32-bit word ops
+    ("word_result_not_sign_extended", "tx_alu.sv", "wire [127:0] wy = {{96{w[31] & ~wu}}, w};", "wire [127:0] wy = {96'd0, w};"),
+    ("word_wu_sign_extends", "tx_alu.sv", "{{96{w[31] & ~wu}}, w}", "{{96{w[31]}}, w}"),
+    ("sraw_is_logical", "tx_alu.sv", "default:         w = $unsigned($signed(a[31:0]) >>> b[4:0]);",
+     "default:         w = a[31:0] >> b[4:0];"),
+    ("sllw_6bit_shamt", "tx_alu.sv", "w = a[31:0] << b[4:0];", "w = a[31:0] << b[5:0];"),
+    ("addiw_decoded_as_addi", "tx_core.sv", "OP_ADDIW: alu_fn = A_ADDW;", "OP_ADDIW: alu_fn = A_ADD;"),
+    ("mulw_low_word_misplaced", "tx_muldiv.sv", "cnt <= w1 ? 8'(32 / MUL_BITS) : 8'(MPASS);", "cnt <= 8'(MPASS);"),
+    ("mulw_shares_mul_cache_kind", "tx_muldiv.sv", "(is_mul & w1) ? 3'd4 : ", ""),
+    ("divw_operands_not_extended", "tx_core.sv", "wire [127:0] md_a = md_dw ? {{96{a[31]}}, a[31:0]} : a;", "wire [127:0] md_a = a;"),
+    ("mulwu_sign_extends", "tx_core.sv", "md_y[31] & (ex_fn != MD_MULWU)", "md_y[31]"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

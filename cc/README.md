@@ -37,6 +37,11 @@ dead-function elimination).
 * block-local common-subexpression elimination (pure ops)
 * loop-invariant constant/address hoisting (`li`/`la` moved to the loop preheader, duplicates merged)
 * load-use bubble filling (an independent ALU op is moved between a load and its first use)
+* **v5 word ops**: `int`/`unsigned` arithmetic whose result must be re-normalised is emitted as one
+  32-bit word instruction (`addw`/`addiw`/`subw`/`mulw`/`sllw`/`slliw`/`divw`, zero-extending
+  `addwu`/`subwu`/`mulwu`/`sllwu` for `unsigned`) instead of the operation plus a `slli`/`srai` pair
+  (`opt.fuse_word_ops`, run last; `sll` by a register and `div` only fuse when the C operation itself is
+  32-bit); any remaining 32-bit sign/zero extension is a single `sext.w`/`zext.w`
 * register allocation: values that are *live* across a call (exact liveness, not interval
   overlap) get callee-saved registers, everything else caller-saved; short-lived values that
   only feed / come from an argument register are allocated directly in `a0`–`a7`, so the copies
@@ -131,5 +136,5 @@ data-dependent branches and load-use pairs.
 * `long long` is 64-bit (LP64 compatibility); 128-bit arithmetic needs `__int128`.
 * One compilation per invocation produces a whole linked program (no separate object files).
 * The optimiser is intra-procedural and simple: no inlining, no global value numbering, no loop
-  induction-variable strength reduction; 32-bit `int` arithmetic needs a re-sign-extension
-  (`slli`/`srai` pair) after operations that can overflow because the ISA has no 32-bit ops.
+  induction-variable strength reduction. (v5: 32-bit `int` arithmetic uses the ISA's word ops;
+  8/16-bit types still re-normalise with a shift pair.)

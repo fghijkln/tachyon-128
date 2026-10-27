@@ -709,6 +709,15 @@ class FuncGen:
         return v
 
     def arith(self, op, a, b, ty):
+        r = self.arith0(op, a, b, ty)
+        if ty.kind != "ptr" and ty.size == 4:
+            for i in reversed(self.code):       # mark the 32-bit C operation (opt.fuse_word_ops)
+                if i.op == "bin":
+                    i.extra = "w32"
+                    break
+        return r
+
+    def arith0(self, op, a, b, ty):
         if op == "add":
             r = self.bin("add", a, b)
         elif op == "sub":

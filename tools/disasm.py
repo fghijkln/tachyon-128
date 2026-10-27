@@ -82,7 +82,7 @@ def disasm(w, pc=0):
     if kind == "amo":
         return f"lr {rd}, ({rs1})" if mn == "lr" else f"{mn} {rd}, {rs2}, ({rs1})"
     if kind == "i":
-        imm = f["uimm14"] if mn == "csetbndi" else (f["uimm14"] & 127 if mn in ("slli", "srli", "srai") else f["imm14"])
+        imm = f["uimm14"] if mn == "csetbndi" else (f["uimm14"] & 127 if mn in SHIFT_I else f["uimm14"] & 31 if mn in SHIFT_IW else f["imm14"])
         return f"{mn} {rd}, {rs1}, {imm}"
     if kind == "k":
         return f"{mn} {rd}, 0x{f['imm16']:04x}, {f['slot']}"

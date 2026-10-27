@@ -12,6 +12,20 @@ module tx_alu (
   wire lt_s = $signed(a) < $signed(b);
   wire lt_u = a < b;
 
+  // v5 word ops: 32-bit result extended to 128 bits (sign, or zero for the ...WU forms)
+  wire        wu = (func == A_ADDWU) | (func == A_SUBWU) | (func == A_SLLWU);
+  logic [31:0] w;
+  always_comb begin
+    case (func)
+      A_ADDW, A_ADDWU: w = a[31:0] + b[31:0];
+      A_SUBW, A_SUBWU: w = a[31:0] - b[31:0];
+      A_SLLW, A_SLLWU: w = a[31:0] << b[4:0];
+      A_SRLW:          w = a[31:0] >> b[4:0];
+      default:         w = $unsigned($signed(a[31:0]) >>> b[4:0]);   // A_SRAW
+    endcase
+  end
+  wire [127:0] wy = {{96{w[31] & ~wu}}, w};
+
   logic [7:0] clz, ctz, pop;
   always_comb begin
     clz = 8'd128;
@@ -43,6 +57,7 @@ module tx_alu (
       A_CLZ:    y = {120'd0, clz};
       A_CTZ:    y = {120'd0, ctz};
       A_POPCNT: y = {120'd0, pop};
+      A_ADDW, A_SUBW, A_SLLW, A_SRLW, A_SRAW, A_ADDWU, A_SUBWU, A_SLLWU: y = wy;
       default:  y = '0;
     endcase
   end

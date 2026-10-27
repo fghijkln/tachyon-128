@@ -539,3 +539,46 @@ def schedule_loads(code):
             busy_use.update(cu)
         k += 1
     return out
+
+
+# v5 32-bit word ops: op + ext(32) -> one word instruction whose result is already canonical.
+# add/sub/mul and sll by an immediate < 32 only need the low 32 operand bits, so any such pair fuses;
+# sll by a register and div need the C operation itself to be 32-bit (count < 32, operands canonical
+# ints), which ir.FuncGen.arith marks with extra = "w32".
+WORD_SIGNED = {"add": "addw", "sub": "subw", "mul": "mulw", "sll": "sllw", "div": "divw"}
+WORD_UNSIGNED = {"add": "addwu", "sub": "subwu", "mul": "mulwu", "sll": "sllwu"}
+BARRIER = {"label", "br", "bcc", "jt", "call", "ret"}
+
+
+def fuse_word_ops(code):
+    dc = def_counts(code)
+    uc = use_counts(code)
+    pos = {}
+    out = list(code)
+    for k, i in enumerate(code):
+        if i.op == "bin" and i.d is not None and i.d >= VREG0 and dc.get(i.d) == 1:
+            pos[i.d] = k
+    dead = set()
+    for k, e in enumerate(code):
+        if e.op != "ext" or e.sz != 32 or e.a is None or e.a < VREG0 or uc.get(e.a) != 1 or e.a not in pos:
+            continue
+        j = pos[e.a]
+        b = code[j]
+        if j > k:
+            continue
+        table = WORD_SIGNED if e.sign else WORD_UNSIGNED
+        w = table.get(b.cc)
+        if w is None:
+            continue
+        if b.cc == "sll" and not (b.b is None and (b.imm & 127) < 32 or b.extra == "w32"):
+            continue
+        if b.cc == "div" and b.extra != "w32":
+            continue
+        if b.b is None and b.cc not in ("add", "sll"):
+            continue        # no immediate form (mul/div/sub by constant keep the register operand)
+        srcs = {b.a, b.b} - {None}
+        if any(x.op in BARRIER or any(d in srcs for d in x.defs()) for x in code[j + 1:k]):
+            continue        # operands must still hold their values at the ext
+        out[k] = Ins("bin", d=e.d, a=b.a, b=b.b, imm=b.imm, cc=w)
+        dead.add(j)
+    return [i for k, i in enumerate(out) if k not in dead]

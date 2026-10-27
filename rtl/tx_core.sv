@@ -58,7 +58,8 @@ module tx_core #(
                  else k[K_ILL] = 1;
       OP_CAP:    if (fn < N_CAP) k[K_CAPR] = 1; else k[K_ILL] = 1;
       OP_AMO:    if (fn < N_AMO) k[K_AMO] = 1; else k[K_ILL] = 1;
-      OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI: k[K_ALUI] = 1;
+      OP_ADDI, OP_ANDI, OP_ORI, OP_XORI, OP_SLTI, OP_SLTIU, OP_SLLI, OP_SRLI, OP_SRAI,
+      OP_ADDIW, OP_SLLIW, OP_SRLIW, OP_SRAIW, OP_ADDIWU, OP_SLLIWU: k[K_ALUI] = 1;
       OP_CINCADDRI, OP_CSETBNDI: k[K_CAPI] = 1;
       OP_WIDE:   k[K_WIDE] = 1;
       OP_LB, OP_LH, OP_LW, OP_LD, OP_LQ, OP_LBU, OP_LHU, OP_LWU, OP_LDU, OP_CLC: k[K_LOAD] = 1;
@@ -305,10 +306,17 @@ module tx_core #(
       OP_SLLI:  alu_fn = A_SLL;
       OP_SRLI:  alu_fn = A_SRL;
       OP_SRAI:  alu_fn = A_SRA;
+      OP_ADDIW: alu_fn = A_ADDW;
+      OP_SLLIW: alu_fn = A_SLLW;
+      OP_SRLIW: alu_fn = A_SRLW;
+      OP_SRAIW: alu_fn = A_SRAW;
+      OP_ADDIWU: alu_fn = A_ADDWU;
+      OP_SLLIWU: alu_fn = A_SLLWU;
       default:  alu_fn = A_ADD;
     endcase
   end
-  wire is_shi = (ex_op == OP_SLLI) | (ex_op == OP_SRLI) | (ex_op == OP_SRAI);
+  wire is_shi = (ex_op == OP_SLLI) | (ex_op == OP_SRLI) | (ex_op == OP_SRAI) |
+                (ex_op == OP_SLLIW) | (ex_op == OP_SRLIW) | (ex_op == OP_SRAIW) | (ex_op == OP_SLLIWU);
   wire [127:0] alu_b = ex_k[K_ALUR] ? b : (is_shi ? ex_uimm : ex_imm);
   logic [127:0] alu_y;
   tx_alu u_alu (.func(alu_fn), .a(a), .b(alu_b), .y(alu_y));
@@ -331,8 +339,15 @@ module tx_core #(
   logic md_ready;
   logic [127:0] md_y;
   logic mem_redirect;
+  // v5 word ops: mulw/mulwu = one 32-bit multiplier pass; divw/remw = div/rem on sign-extended low words
+  wire md_mw  = (ex_fn == MD_MULW) | (ex_fn == MD_MULWU);
+  wire md_dw  = (ex_fn == MD_DIVW) | (ex_fn == MD_REMW);
+  wire [2:0] md_op = md_mw ? 3'd0 : (ex_fn == MD_DIVW) ? 3'd2 : (ex_fn == MD_REMW) ? 3'd4 : ex_fn[2:0];
+  wire [127:0] md_a = md_dw ? {{96{a[31]}}, a[31:0]} : a;
+  wire [127:0] md_b = md_dw ? {{96{b[31]}}, b[31:0]} : b;
+  wire [127:0] md_res = (md_mw | md_dw) ? {{96{md_y[31] & (ex_fn != MD_MULWU)}}, md_y[31:0]} : md_y;
   tx_muldiv u_md (.clk(clk), .rst(rst), .req(idex_valid & ex_k[K_MD] & ~halted_q), .abort(mem_redirect),
-                  .op(ex_fn[2:0]), .a(a), .b(b), .ready(md_ready), .y(md_y),
+                  .op(md_op), .w1(md_mw), .a(md_a), .b(md_b), .ready(md_ready), .y(md_y),
                   .sh_busy(sh_busy), .sh_x(sh_x), .sh_z(sh_z), .sh_p(sh_p));
   wire stall_md = idex_valid & ex_k[K_MD] & ~md_ready;
 
@@ -506,7 +521,7 @@ module tx_core #(
   always_comb begin
     ex_val = alu_y; ex_meta = '0;
     if (ex_k[K_SIMD]) ex_val = simd_y;
-    else if (ex_k[K_MD]) ex_val = md_y;
+    else if (ex_k[K_MD]) ex_val = md_res;
     else if (ex_k[K_CAPR] | ex_k[K_CAPI]) begin ex_val = cap_y; ex_meta = cap_m; end
     else if (ex_k[K_WIDE]) ex_val = wide_y;
     else if (ex_k[K_JAL] | ex_k[K_JALR]) ex_val = ex_pc4;

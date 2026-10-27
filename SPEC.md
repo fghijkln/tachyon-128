@@ -1,4 +1,4 @@
-# TACHYON-128 Instruction Set Architecture — v4.0
+# TACHYON-128 Instruction Set Architecture — v5.0
 
 > *"Faster than light, wider than life."*  A 128-bit load/store architecture with hardware
 > capabilities, in-register SIMD lanes and wide-immediate constant fusion.
@@ -27,6 +27,7 @@
 - **异常**：非法指令、能力错误（tag/边界/权限/密封）、未对齐、访问错误；精确异常，写入 `epc/cause/tval`，跳到 `tvec`（若 `tvec=0` 则停机），`eret` 返回。
 - **v2 定时器中断**：`mtime`（MMIO+0x30）= 已退休指令数（确定性时间基），`mtimecmp`（MMIO+0x40）；`status` CSR 的 IE/PIE/TIE 位；中断在“下一条指令之前”精确投递，黄金模型与 RTL 在同一退休点上一致。
 - **MMIO**：位于 128 位地址空间最顶端 64 KiB，提供控制台输出、十六进制输出和退出（停机）寄存器。
+- **v5 32 位字运算（RV64 “W” 风格）**：`addw/subw/sllw/srlw/sraw/mulw/divw/remw` 与立即数形式 `addiw/slliw/srliw/sraiw`，只看源操作数低 32 位，结果符号扩展到 128 位；另有零扩展变体 `addwu/subwu/sllwu/mulwu/addiwu/slliwu`（无符号 `int`）。伪指令 `sext.w`/`zext.w`。`mulw` 只需乘法器一遍（3 周期，完整乘法 6 周期）。C 编译器用它们取代 `int` 运算后的两条移位扩展指令。
 - **v4 可读 EPCC**：`cgetepcc rd`（仅内核态）读出 EPCC（游标 = epc），内核可在抢占时保存任务的真实 PCC。
 - **v4 原子操作**：128 位 `lr`/`sc`（单核语义，任何存储或陷入都会清除保留）以及 `amoswap/amoadd/amoand/amoor/amoxor`；`lr`/`sc`/`amoswap` 遵循 `clc`/`csc` 的标签规则，可原子地交换能力。
 - **v4 微架构**：8 项返回地址栈（RAS，推测更新 + 提交副本在陷入时恢复）预测 `call`/`ret`；乘法器面积缩小——标量乘法的 128×32 部分积阵列与 SIMD `vmul` 共享一块“可拆分”的 4×(32×32) radix-4 Booth 乘法阵列（仍为 6 周期）。
@@ -113,9 +114,12 @@ At reset all registers read as zero and untagged, except `rc` (r63), which holds
 | 0x03 | SIMD (func8 = sop<<2 \| lane, §5.2) | R |
 | 0x04 | CAP (§5.1) | R |
 | 0x05 | AMO (v4 atomics, §4.6): `lr sc amoswap amoadd amoand amoor amoxor` | R |
+| 0x06 / 0x07 | `addiwu` / `slliwu` (v5 word immediates, zero-extended result, §4.1.1) | I |
 | 0x08–0x10 | `addi andi ori xori slti sltiu slli srli srai` | I |
 | 0x11 | `cincaddri` | I |
 | 0x12 | `csetbndi` (imm is **unsigned** 14-bit length) | I |
+| 0x13 | `addiw` (v5, §4.1.1) | I |
+| 0x15–0x17 | `slliw srliw sraiw` (v5, §4.1.1) | I |
 | 0x14 | `wli` (k=0) / `wins` (k=1) | K |
 | 0x18–0x20 | `lb lh lw ld lq lbu lhu lwu ldu` | I |
 | 0x21 | `clc` (capability load, §5.1.1) | I |
@@ -154,10 +158,32 @@ All arithmetic is modulo 2^128. Results written by these instructions are **unta
 | 16 | `clz rd, rs1` | leading zeros (0..128) |
 | 17 | `ctz rd, rs1` | trailing zeros (0..128) |
 | 18 | `popcnt rd, rs1` | population count |
-| ≥19 | — | illegal |
+| 19–23 | `addw subw sllw srlw sraw` | v5 word ops, §4.1.1 (sign-extended 32-bit result) |
+| 24–26 | `addwu subwu sllwu` | v5 word ops, §4.1.1 (zero-extended 32-bit result) |
+| ≥27 | — | illegal |
 
 Immediate forms (`addi andi ori xori slti sltiu`) sign-extend imm14 to 128 bits (`sltiu` compares against
 the sign-extended value as unsigned). `slli srli srai` use imm[6:0] as the shift amount.
+
+### 4.1.1 32-bit word operations (v5)
+
+RV64-style "W" instructions for 32-bit `int` arithmetic on a 128-bit machine. Let `W(x)` be the low 32 bits of x,
+`sext32(v)` / `zext32(v)` extend the low 32 bits of v to 128 bits. Only the low 32 bits of the sources matter.
+
+| Mnemonic | Result |
+|---|---|
+| `addw rd, rs1, rs2` / `addiw rd, rs1, imm14` | sext32(W(rs1) + W(rs2 or sext(imm))) |
+| `subw` | sext32(W(rs1) − W(rs2)) |
+| `sllw` / `slliw` | sext32(W(rs1) << sh), sh = rs2[4:0] or imm[4:0] |
+| `srlw` / `srliw` | sext32(W(rs1) >> sh) (logical shift of the 32-bit word) |
+| `sraw` / `sraiw` | sext32(sext32(rs1) >>> sh) |
+| `addwu` / `addiwu`, `subwu`, `sllwu` / `slliwu` | as `addw`/`subw`/`sllw` but **zext32** of the result (unsigned `int`) |
+| `mulw` / `mulwu` (MULDIV 6/7) | sext32 / zext32 of W(rs1) × W(rs2) |
+| `divw` / `remw` (MULDIV 8/9) | sext32 of `div` / `rem` applied to sext32(rs1), sext32(rs2) |
+
+`divw`/`remw` inherit §4.2's corner cases on 32-bit values: x/0 = −1, x%0 = sext32(x), INT_MIN/−1 = INT_MIN,
+INT_MIN%−1 = 0. Pseudo-ops: `sext.w rd, rs` = `addiw rd, rs, 0`; `zext.w rd, rs` = `addiwu rd, rs, 0`.
+Results are untagged like every integer result.
 
 ### 4.2 Multiply / divide (op 0x02)
 
@@ -169,6 +195,8 @@ the sign-extended value as unsigned). `slli srli srai` use imm[6:0] as the shift
 | 3 | `divu` | unsigned quotient |
 | 4 | `rem` | signed remainder (sign of dividend) |
 | 5 | `remu` | unsigned remainder |
+| 6/7/8/9 | `mulw` / `mulwu` / `divw` / `remw` | v5 word ops (§4.1.1) |
+| ≥10 | — | illegal |
 
 Division by zero: quotient = all ones, remainder = dividend. Signed overflow (−2^127 / −1): quotient = −2^127,
 remainder = 0. No trap is raised (RISC-V convention).
@@ -606,7 +634,7 @@ label:  op operands      # comment   (';' also starts a comment)
   symbols (`+ - * / % << >> & | ^ ~`, char literals `'A'`).
 * Directives: `.org .align .space .equ/.set .byte .half .word .dword .quad .ascii .asciz .include`.
 * Atomics (v4): `lr rd, (rs1)`, `sc rd, rs2, (rs1)`, `amoadd rd, rs2, (rs1)` (no offset allowed).
-* Pseudo-ops: `nop li la mv cmove not neg seqz snez j call ret jr beqz bnez bltz bgez bgtz blez bgt ble bgtu bleu`,
+* Pseudo-ops: `nop li la mv cmove not neg seqz snez sext.w zext.w j call ret jr beqz bnez bltz bgez bgtz blez bgt ble bgtu bleu`,
   `halt` (no operand = `halt zero`), `jal label` (= `jal ra, label`).
 
 ## 9. Known limitations (deliberate)
@@ -658,6 +686,10 @@ These describe `rtl/` timing only; software must not depend on them.
 * **Multiplier (v3):** radix-2^32 multi-pass multiplier. Each cycle one 128 × 32 partial-product array (reduced
   carry-save by synthesis) is added to the upper half of a 256-bit accumulator, which then shifts right by 32;
   four passes produce the full 256-bit product and the last pass writes the result cache directly.
+  v5: `mulw`/`mulwu` stop after the first pass (the low 32 product bits only depend on the low 32 multiplier
+  bits): 3 cycles in EX instead of 6; they use their own result-cache kind so a following full `mul` on the same
+  operands is not served the partial product. `divw`/`remw` feed sign-extended words to the divider, whose early
+  termination already makes 32-bit quotients cheap.
   Latency = 6 cycles in EX (1 issue + 4 passes + 1 result), v2's radix-16 shift-add needed 35. `mul`/`mulhu` on
   the same operands still share one computation (result cache: the second one costs 0 extra cycles).
   `+define+TX_MUL_BITS=4` rebuilds the v2 radix-16 datapath (any divisor of 128 is a legal pass width).

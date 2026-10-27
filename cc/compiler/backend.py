@@ -275,7 +275,8 @@ LOADS = {(1, True): "lb", (2, True): "lh", (4, True): "lw", (8, True): "ld", (16
          (1, False): "lbu", (2, False): "lhu", (4, False): "lwu", (8, False): "ldu", (16, False): "lq"}
 STORES = {1: "sb", 2: "sh", 4: "sw", 8: "sd", 16: "sq"}
 IMM_FORM = {"add": "addi", "and": "andi", "or": "ori", "xor": "xori", "slt": "slti", "sltu": "sltiu",
-            "sll": "slli", "srl": "srli", "sra": "srai"}
+            "sll": "slli", "srl": "srli", "sra": "srai",
+            "addw": "addiw", "addwu": "addiwu", "sllw": "slliw", "sllwu": "slliwu"}
 BR = {"eq": "beq", "ne": "bne", "lt": "blt", "ge": "bge", "ltu": "bltu", "geu": "bgeu"}
 NEG = {"eq": "bne", "ne": "beq", "lt": "bge", "ge": "blt", "ltu": "bgeu", "geu": "bltu"}
 
@@ -422,6 +423,8 @@ class Emitter:
             imm = i.imm
             if i.cc in ("sll", "srl", "sra"):
                 self.e(f"{IMM_FORM[i.cc]} {rn(d)}, {rn(a)}, {imm & 127}")
+            elif i.cc in ("sllw", "sllwu"):
+                self.e(f"{IMM_FORM[i.cc]} {rn(d)}, {rn(a)}, {imm & 31}")
             elif i.cc in IMM_FORM and fits14(imm):
                 self.e(f"{IMM_FORM[i.cc]} {rn(d)}, {rn(a)}, {imm}")
             else:
@@ -440,6 +443,8 @@ class Emitter:
         sh = 128 - i.sz
         if not i.sign and i.sz == 8:
             self.e(f"andi {rn(d)}, {rn(a)}, 255")
+        elif i.sz == 32:                                   # v5: sext.w / zext.w
+            self.e(f"{'addiw' if i.sign else 'addiwu'} {rn(d)}, {rn(a)}, 0")
         else:
             self.e(f"slli {rn(d)}, {rn(a)}, {sh}")
             self.e(f"{'srai' if i.sign else 'srli'} {rn(d)}, {rn(d)}, {sh}")

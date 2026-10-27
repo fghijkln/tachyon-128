@@ -13,7 +13,7 @@
 //    Divide-by-zero is instant.
 //  * Result cache: the last product (lo,hi) or quotient/remainder pair is kept with its
 //    operands, so MULHU after MUL, or REMU after DIVU, on the same operands takes 0 extra cycles.
-// op: 0 MUL, 1 MULHU, 2 DIV, 3 DIVU, 4 REM, 5 REMU
+// op: 0 MUL, 1 MULHU, 2 DIV, 3 DIVU, 4 REM, 5 REMU; w1 (v5 mulw/mulwu): one 32-bit pass, low word in y[31:0]
 `default_nettype none
 module tx_muldiv #(
 `ifdef TX_DIV_STEPS
@@ -33,6 +33,7 @@ module tx_muldiv #(
   input  wire logic         req,     // EX holds a valid mul/div instruction
   input  wire logic         abort,   // EX is being flushed
   input  wire logic [2:0]   op,
+  input  wire logic         w1,      // v5 mulw: only the low 32 product bits are needed (32 multiplier bits)
   input  wire logic [127:0] a,
   input  wire logic [127:0] b,
   output logic              ready,   // y valid this cycle; EX may advance
@@ -49,10 +50,10 @@ module tx_muldiv #(
   wire is_mul   = (op == 3'd0) || (op == 3'd1);
   wire is_sdiv  = (op == 3'd2) || (op == 3'd4);
   wire want_hi  = (op == 3'd1) || (op == 3'd4) || (op == 3'd5);
-  wire [1:0] kind = is_mul ? 2'd1 : (is_sdiv ? 2'd3 : 2'd2);
+  wire [2:0] kind = (is_mul & w1) ? 3'd4 : is_mul ? 3'd1 : (is_sdiv ? 3'd3 : 3'd2);   // 4: mulw low word
 
   // ---------------------------------------------------------------- result cache
-  logic [1:0]   c_kind;            // 0 = invalid
+  logic [2:0]   c_kind;            // 0 = invalid
   logic [127:0] c_a, c_b, c_lo, c_hi;
   wire hit = (c_kind == kind) && (c_a == a) && (c_b == b);
 
@@ -68,7 +69,8 @@ module tx_muldiv #(
   logic [129:0] Bd3;               // 3 x divisor
   logic         qneg, rneg, lmul;
   logic [7:0]   cnt;
-  logic [1:0]   l_kind;
+  logic [2:0]   l_kind;
+  logic         l_w1;
   logic [127:0] l_a, l_b;
 
   // magnitudes & leading-zero count for the divider
@@ -150,7 +152,7 @@ module tx_muldiv #(
   always_ff @(posedge clk) begin
     if (rst) begin
       st <= IDLE;
-      c_kind <= 2'd0;
+      c_kind <= 3'd0;
       cnt <= '0;
     end else if (abort && st != DONE) begin
       st <= IDLE;
@@ -159,10 +161,11 @@ module tx_muldiv #(
         IDLE: if (start) begin
           l_kind <= kind; l_a <= a; l_b <= b;
           lmul <= is_mul;
+          l_w1 <= w1;
           if (is_mul) begin
             acc <= {128'd0, b};
             mA  <= a;
-            cnt <= 8'(MPASS);
+            cnt <= w1 ? 8'(32 / MUL_BITS) : 8'(MPASS);
             st  <= RUN;
           end else begin
             qneg <= sa ^ sb;
@@ -178,7 +181,7 @@ module tx_muldiv #(
         RUN: begin
           if (lmul && cnt == 8'd1) begin       // last pass writes the cache directly
             c_kind <= l_kind; c_a <= l_a; c_b <= l_b;
-            c_lo <= acc_nx[127:0];
+            c_lo <= l_w1 ? {96'd0, acc_nx[127:96]} : acc_nx[127:0];   // after 32 multiplier bits the low word is here
             c_hi <= acc_nx[255:128];
             st <= DONE;
           end else if (cnt == 0) begin

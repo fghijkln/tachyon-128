@@ -214,6 +214,9 @@ class Assembler:
             if mn in ("slli", "srli", "srai"):
                 if not 0 <= v < 128:
                     raise AsmError("shift amount out of range")
+            elif mn in SHIFT_IW:
+                if not 0 <= v < 32:
+                    raise AsmError("shift amount out of range")
             elif mn == "csetbndi":
                 imm14(v, signed=False)
             else:
@@ -297,6 +300,9 @@ class Assembler:
         if mn == "not":
             need(2)
             return [enc_i(OP_XORI, R(ops[0]), R(ops[1]), -1)]
+        if mn in ("sext.w", "zext.w"):                # v5: addiw / addiwu rd, rs, 0
+            need(2)
+            return [enc_i(OP_ADDIW if mn == "sext.w" else OP_ADDIWU, R(ops[0]), R(ops[1]), 0)]
         if mn == "neg":
             need(2)
             return [enc_r(OP_ALU, R(ops[0]), 0, R(ops[1]), ALU_FUNCS.index("sub"))]
