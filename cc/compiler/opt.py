@@ -765,6 +765,9 @@ def local_cse(code):
 
 
 SCHED_MOVABLE = {"bin", "ext", "li", "la", "mov", "faddr"}
+# purecap capability arithmetic can trap (sealed/sentry operand, bounds): never hoisted above a store, so a
+# trap stays behind every side effect (MMIO output included) that precedes it in program order
+CAP_TRAPPING = {"cadd", "csetbnd", "csetaddr", "candperm"}
 
 
 def _regs(i):
@@ -788,18 +791,21 @@ def schedule_loads(code):
         busy_def = set(ldf)          # defined between k and j: j may not read these
         busy_use = set(lu)           # read between k and j: j may not redefine these
         busy_def_all = set(ldf)      # j may not redefine anything defined in between either
+        crossed_store = False
         for m in range(k + 1, min(n, k + 12)):
             c = out[m]
             if c.op in ("label", "br", "bcc", "ret", "jt", "call"):
                 break
             cu, cd = _regs(c)
             if m > k + 1 and c.op in SCHED_MOVABLE and not (set(cu) & busy_def) \
-                    and not (set(cd) & busy_use) and not (set(cd) & busy_def_all):
+                    and not (set(cd) & busy_use) and not (set(cd) & busy_def_all) \
+                    and not (crossed_store and c.op == "bin" and c.cc in CAP_TRAPPING):
                 out.insert(k + 1, out.pop(m))
                 break
             busy_def.update(cd)
             busy_def_all.update(cd)
             busy_use.update(cu)
+            crossed_store = crossed_store or c.op not in SCHED_MOVABLE and c.op != "ld"
         k += 1
     return out
 
