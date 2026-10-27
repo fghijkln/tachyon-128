@@ -32,6 +32,12 @@ def feature_key():
     return "".join(".no" + f for f in PC_FEATURES if not pc_feature(f))
 
 
+def perf_key():
+    """libc cache key part for TCC128_DISABLE (v6 perf passes switched off)."""
+    d = os.environ.get("TCC128_DISABLE", "")
+    return ".dis-" + d.replace(",", "-") if d else ""
+
+
 SYM_RE = re.compile(r"\b(_[A-Za-z0-9_]+)\b")
 
 
@@ -92,6 +98,7 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
             fg = fgs[id(o)]
             code = fg.code
             if optimize:
+                opt.PURECAP = purecap
                 code = opt.fuse_word_ops(opt.schedule_loads(opt.hoist_constants(opt.optimize(opt.local_cse(opt.optimize(code))))))
             else:
                 code = opt.jump_cleanup(code)
@@ -162,7 +169,7 @@ def libc_units(include_paths=(), optimize=True, purecap=False):
     hdr = max([os.path.getmtime(os.path.join(INCLUDE_DIR, f)) for f in os.listdir(INCLUDE_DIR)] + [0])
     for k, f in enumerate(srcs):
         path = os.path.join(LIB_DIR, f)
-        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + (".pc" if purecap else "") + ("" if inline_enabled() else ".noinl") + (feature_key() if purecap else "") + ".pkl")
+        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + (".pc" if purecap else "") + ("" if inline_enabled() else ".noinl") + (feature_key() if purecap else "") + perf_key() + ".pkl")
         if os.path.exists(cache) and os.path.getmtime(cache) > max(os.path.getmtime(path), newest_compiler, hdr):
             with open(cache, "rb") as fh:
                 units.append(pickle.load(fh))

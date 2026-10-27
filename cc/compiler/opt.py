@@ -3,6 +3,14 @@ redundant-extension removal, copy propagation, retargeting and dead-code elimina
 from .ir import VREG0, ZERO, Ins, fits14
 
 M128 = (1 << 128) - 1
+PURECAP = False      # set by the driver per unit: -mpurecap code (integer adds never feed a capability base)
+
+
+def enabled(name):
+    """v6 perf passes can be switched off individually for A/B measurements and bisecting:
+    TCC128_DISABLE=name[,name...] (part of the libc cache key)."""
+    import os
+    return name not in os.environ.get("TCC128_DISABLE", "").split(",")
 IMM_OPS = {"add", "and", "or", "xor", "slt", "sltu", "sll", "srl", "sra", "cadd"}
 COMMUTATIVE = {"add", "and", "or", "xor", "mul", "seq", "min", "max", "minu", "maxu"}
 PURE = {"li", "la", "mov", "bin", "ext", "ld", "faddr"}
@@ -231,6 +239,8 @@ def optimize(code):
         code = out
         if demanded_bits(code):
             changed = True
+        if enabled("basefold") and fold_bases(code):
+            changed = True
         # copy propagation: single-def d = mov s (s single-def vreg or a never-redefined phys? no)
         dc = def_counts(code)
         rep = {}
@@ -278,6 +288,55 @@ def optimize(code):
         if not changed:
             break
     return code
+
+
+def fold_bases(code):
+    """v6 base+offset folding (post-increment pointers): within a block, track y == x + k for
+    y = mov x / y = add x, imm, and keep the relation when x itself steps (x = add x, c, or
+    x = mov t with t == x + c).  A load/store through y then uses x with the offset adjusted,
+    so `*d++ = *s++` becomes `lb t, -1(s); sb t, -1(d)` after the increments and the
+    old-value copies die.  In purecap code only plain copies are tracked (an integer add drops
+    the tag, so rebasing onto the tagged source would change which accesses trap)."""
+    eq = {}           # y -> (x, k): y == x + k at this point
+    did = False
+    for i in code:
+        op = i.op
+        if op == "label":
+            eq = {}
+            continue
+        if op == "ld" and i.a is not None and i.a in eq:
+            x, k = eq[i.a]
+            if fits14(i.imm + k):
+                i.a, i.imm = x, i.imm + k
+                did = True
+        elif op == "st" and i.b is not None and i.b in eq:
+            x, k = eq[i.b]
+            if fits14(i.imm + k):
+                i.b, i.imm = x, i.imm + k
+                did = True
+        if op == "call":
+            continue
+        for d in i.defs():
+            if d is None:
+                continue
+            step = None
+            if op == "bin" and i.cc == "add" and i.b is None and i.a == d and i.imm is not None:
+                step = sx(i.imm)
+            elif op == "mov" and i.a in eq and eq[i.a][0] == d:
+                step = eq[i.a][1]
+            eq.pop(d, None)
+            if step is not None:
+                eq = {y: ((x, k - step) if x == d else (x, k)) for y, (x, k) in eq.items()}
+            else:
+                eq = {y: v for y, v in eq.items() if v[0] != d}
+            if d < VREG0:
+                continue
+            if op == "mov" and i.a is not None and i.a >= VREG0 and i.a != d:
+                eq[d] = (i.a, 0)
+            elif op == "bin" and i.cc == "add" and i.b is None and i.imm is not None and \
+                    i.a is not None and i.a >= VREG0 and i.a != d and not PURECAP:
+                eq[d] = (i.a, sx(i.imm))
+    return did
 
 
 def jump_cleanup(code):
