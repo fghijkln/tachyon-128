@@ -1,0 +1,80 @@
+[
+ {
+  "name": "coremark_lite",
+  "opt": "-O",
+  "purecap": true,
+  "size": 9408,
+  "retired": 282739,
+  "ok": true,
+  "out": "coremark-lite crc = 0xee93",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 392760,
+  "cpi": 1.389
+ },
+ {
+  "name": "dhrystone",
+  "opt": "-O",
+  "purecap": true,
+  "size": 16992,
+  "retired": 294958,
+  "ok": true,
+  "out": "Int_Glob=5 Bool_Glob=1 Ch_1=A Ch_2=B Arr_1[8]=7 Arr_2[8][7]=410\nPtr_Glob: 0 2 17 DHRYSTONE PROGRAM, SOME STRING\nInt_1=5 Int_2=13 Int_3=7 Enum=1 Str_2=DHRYSTONE PROGRAM, 2'ND STRING\nruns=400",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 362177,
+  "cpi": 1.228
+ },
+ {
+  "name": "fib",
+  "opt": "-O",
+  "purecap": true,
+  "size": 4192,
+  "retired": 372958,
+  "ok": true,
+  "out": "fib(20) = 6765",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 395597,
+  "cpi": 1.061
+ },
+ {
+  "name": "int128",
+  "opt": "-O",
+  "purecap": true,
+  "size": 4960,
+  "retired": 47138,
+  "ok": true,
+  "out": "34! = 295232799039604140847618609643520000000\nlcg = 42639905091746834075274079931108416329\n3rd largest 64-bit prime candidate found: 18446744073709551521",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 152255,
+  "cpi": 3.23
+ },
+ {
+  "name": "qsort",
+  "opt": "-O",
+  "purecap": true,
+  "size": 12672,
+  "retired": 345086,
+  "ok": true,
+  "out": "sorted=1 checksum=10715965524919300309 min=29 max=99984",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 441704,
+  "cpi": 1.28
+ },
+ {
+  "name": "sieve",
+  "opt": "-O",
+  "purecap": true,
+  "size": 12416,
+  "retired": 430385,
+  "ok": true,
+  "out": "1899 primes",
+  "rtl_ok": true,
+  "rtl_msg": "",
+  "cycles": 471468,
+  "cpi": 1.095
+ }
+]
