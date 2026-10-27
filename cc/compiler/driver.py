@@ -5,7 +5,7 @@ import os
 import pickle
 import re
 
-from . import backend, ir, opt
+from . import backend, inline, ir, opt
 from .lexer import CompileError
 from .parser import Parser
 from .preproc import Preprocessor
@@ -15,6 +15,11 @@ CC_DIR = os.path.dirname(HERE)
 INCLUDE_DIR = os.path.join(CC_DIR, "include")
 LIB_DIR = os.path.join(CC_DIR, "lib")
 CACHE_DIR = os.path.join(CC_DIR, ".cache")
+
+def inline_enabled():
+    """-O inlines small static functions; TCC128_NO_INLINE=1 (or tcc128.py -fno-inline) turns it off."""
+    return os.environ.get("TCC128_NO_INLINE", "") in ("", "0")
+
 
 SYM_RE = re.compile(r"\b(_[A-Za-z0-9_]+)\b")
 
@@ -34,6 +39,7 @@ class Unit:
         self.purecap = purecap
         self.fnid = 0
         self.items = []
+        self.inline_stats = {}  # callee name -> call sites inlined
 
 
 def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=None, purecap=False):
@@ -49,6 +55,22 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
     objs = p.parse()
     unit = Unit(uid, purecap)
     seen = set()
+    # IR for every function first, so small static functions can be inlined into their callers (-O)
+    fgs = {}
+    for o in objs:
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
+        if o.is_func and o.body is not None:
+            unit.fnid += 1
+            fg = ir.FuncGen(o, unit)
+            fg.own_fnid = unit.fnid
+            fgs[id(o)] = fg.gen()
+    if optimize and inline_enabled():
+        by_name = {fg.fn.asm_name: fg for fg in fgs.values()}
+        for fg in fgs.values():
+            inline.inline_into(fg, by_name, unit.inline_stats)
+    seen = set()
     for o in objs:
         if id(o) in seen:
             continue
@@ -56,8 +78,7 @@ def compile_unit(path, uid, include_paths=(), defines=None, optimize=True, src=N
         if o.is_func:
             if o.body is None:
                 continue
-            unit.fnid += 1
-            fg = ir.FuncGen(o, unit).gen()
+            fg = fgs[id(o)]
             code = fg.code
             if optimize:
                 code = opt.fuse_word_ops(opt.schedule_loads(opt.hoist_constants(opt.optimize(opt.local_cse(opt.optimize(code))))))
@@ -130,7 +151,7 @@ def libc_units(include_paths=(), optimize=True, purecap=False):
     hdr = max([os.path.getmtime(os.path.join(INCLUDE_DIR, f)) for f in os.listdir(INCLUDE_DIR)] + [0])
     for k, f in enumerate(srcs):
         path = os.path.join(LIB_DIR, f)
-        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + (".pc" if purecap else "") + ".pkl")
+        cache = os.path.join(CACHE_DIR, f + (".O" if optimize else ".O0") + (".pc" if purecap else "") + ("" if inline_enabled() else ".noinl") + ".pkl")
         if os.path.exists(cache) and os.path.getmtime(cache) > max(os.path.getmtime(path), newest_compiler, hdr):
             with open(cache, "rb") as fh:
                 units.append(pickle.load(fh))
