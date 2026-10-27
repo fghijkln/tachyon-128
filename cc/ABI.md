@@ -50,7 +50,10 @@ already named in `SPEC.md` §1.2 and adds what a compiler needs.
 | r63 | `rc` | root capability; **never written or read by compiled code** | — |
 
 The register allocator uses r12–r27 and r54–r58 for values that do not live across a call and
-r28–r53 for values that do (or when the caller-saved pool is exhausted). Leaving `rc` untouched
+r28–r53 for values that do (or when the caller-saved pool is exhausted). A value whose whole
+lifetime is a short staging window inside one basic block (an argument computed for the next call,
+an incoming argument or call result consumed before anything else touches that register) may also
+live directly in `a0`–`a7`; this is invisible at call boundaries. Leaving `rc` untouched
 means a C program can be run under a kernel that later revokes or narrows it.
 
 ## 3. Calls

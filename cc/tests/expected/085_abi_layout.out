@@ -1,0 +1,28 @@
+_Bool                  size  1 align  1
+char                   size  1 align  1
+short                  size  2 align  2
+int                    size  4 align  4
+long                   size  8 align  8
+long long              size  8 align  8
+__int128               size 16 align 16
+enum e                 size  4 align  4
+size_t                 size  8 align  8
+ptrdiff_t              size  8 align  8
+struct s1              size  8 align  4
+struct s2              size 24 align  8
+struct s3              size 48 align 16
+struct s4              size  6 align  2
+struct s5              size 16 align  8
+union u1               size  8 align  4
+union u2               size 16 align 16
+struct bf1             size  4 align  4
+struct bf2             size  8 align  4
+struct bf3             size  8 align  4
+struct bf4             size  4 align  2
+struct nest            size 80 align 16
+offs 8 16 16 32 16 64
+bf1 00012c8d
+bf3 9 6
+bf4 07 21 fe 01
+
+---exit 0

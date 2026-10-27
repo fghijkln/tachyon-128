@@ -499,3 +499,43 @@ def local_cse(code):
         if i.b in rename:
             i.b = rename[i.b]
     return out
+
+
+SCHED_MOVABLE = {"bin", "ext", "li", "la", "mov", "faddr"}
+
+
+def _regs(i):
+    return ([u for u in i.uses() if u is not None], [d for d in i.defs() if d is not None])
+
+
+def schedule_loads(code):
+    """Load-use bubble filling (the pipeline stalls one cycle when an instruction needs the
+    result of the load just before it): when `ld d` is directly followed by a reader of d,
+    pull the nearest later independent pure instruction of the same block up between them.
+    Never crosses labels, branches, calls or returns."""
+    out = list(code)
+    n = len(out)
+    k = 0
+    while k < n - 2:
+        ld = out[k]
+        if ld.op != "ld" or ld.d is None or ld.d not in _regs(out[k + 1])[0]:
+            k += 1
+            continue
+        lu, ldf = _regs(ld)
+        busy_def = set(ldf)          # defined between k and j: j may not read these
+        busy_use = set(lu)           # read between k and j: j may not redefine these
+        busy_def_all = set(ldf)      # j may not redefine anything defined in between either
+        for m in range(k + 1, min(n, k + 12)):
+            c = out[m]
+            if c.op in ("label", "br", "bcc", "ret", "jt", "call"):
+                break
+            cu, cd = _regs(c)
+            if m > k + 1 and c.op in SCHED_MOVABLE and not (set(cu) & busy_def) \
+                    and not (set(cd) & busy_use) and not (set(cd) & busy_def_all):
+                out.insert(k + 1, out.pop(m))
+                break
+            busy_def.update(cd)
+            busy_def_all.update(cd)
+            busy_use.update(cu)
+        k += 1
+    return out
