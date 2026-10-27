@@ -1,5 +1,7 @@
 // TACHYON-128 iterative multiply/divide unit.
-//  * MUL/MULHU: radix-16 shift-add, 32 iterations, full 256-bit product.
+//  * MUL/MULHU: radix-2^MUL_BITS multiplier: each cycle one 128 x MUL_BITS partial-product array
+//    (carry-save reduced by synthesis) is added into the 256-bit accumulator. Default MUL_BITS = 32:
+//    4 passes, latency 6 cycles in EX (v2: radix-16, 32 passes, 35 cycles). Full 256-bit product.
 //  * DIV/DIVU/REM/REMU: radix-4 restoring on magnitudes (2 quotient bits per cycle: the three
 //    candidates 4R+d-B, 4R+d-2B, 4R+d-3B are compared in parallel) with operand-normalised early
 //    termination: only n = sig(|a|) - sig(|b|) + 1 quotient bits are produced (rounded up to even),
@@ -15,6 +17,12 @@ module tx_muldiv #(
   parameter int DIV_STEPS = `TX_DIV_STEPS
 `else
   parameter int DIV_STEPS = 2      // radix-4 steps per cycle: 1 = radix-4 (2 b/cycle), 2 = 4 b/cycle
+`endif
+  ,
+`ifdef TX_MUL_BITS
+  parameter int MUL_BITS = `TX_MUL_BITS
+`else
+  parameter int MUL_BITS = 32      // multiplier bits retired per cycle (must divide 128): 4 = v2 radix-16
 `endif
 ) (
   input  wire logic         clk,
@@ -75,8 +83,10 @@ module tx_muldiv #(
   wire [8:0] qn_up  = qn_raw + 9'(BPC - 1);
   wire [7:0] qn     = qn_up[7:0] & ~8'(BPC - 1);
 
-  // one multiply step
-  wire [131:0] mstep = {4'd0, acc[255:128]} + mA * acc[3:0];
+  // one multiply pass: high half + multiplicand x next MUL_BITS multiplier bits
+  localparam int MPASS = 128 / MUL_BITS;
+  wire [127+MUL_BITS:0] mstep = {{MUL_BITS{1'b0}}, acc[255:128]} + mA * acc[MUL_BITS-1:0];
+  wire [255:0]          acc_nx = {mstep, acc[127:MUL_BITS]};
   // radix-4 divide step: r4 = 4R + next two dividend bits (< 4B); candidates compared in parallel
   function automatic logic [129:0] r4step(input logic [127:0] r, input logic [1:0] nb,
                                           input logic [127:0] bd, input logic [129:0] bd3);
@@ -134,7 +144,7 @@ module tx_muldiv #(
           if (is_mul) begin
             acc <= {128'd0, b};
             mA  <= a;
-            cnt <= 8'd32;
+            cnt <= 8'(MPASS);
             st  <= RUN;
           end else begin
             qneg <= sa ^ sb;
@@ -148,7 +158,12 @@ module tx_muldiv #(
           end
         end
         RUN: begin
-          if (cnt == 0) begin
+          if (lmul && cnt == 8'd1) begin       // last pass writes the cache directly
+            c_kind <= l_kind; c_a <= l_a; c_b <= l_b;
+            c_lo <= acc_nx[127:0];
+            c_hi <= acc_nx[255:128];
+            st <= DONE;
+          end else if (cnt == 0) begin
             c_kind <= l_kind; c_a <= l_a; c_b <= l_b;
             if (lmul) begin
               c_lo <= acc[127:0];
@@ -160,7 +175,7 @@ module tx_muldiv #(
             st <= DONE;
           end else begin
             cnt <= cnt - 8'd1;
-            if (lmul) acc <= {mstep, acc[127:4]};
+            if (lmul) acc <= acc_nx;
             else begin
               R <= r_nx;
               Q <= q_nx;

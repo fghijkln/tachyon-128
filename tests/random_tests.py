@@ -63,8 +63,8 @@ class Gen:
     def one(self, allow_ctrl=True):
         r = self.r
         k = r.choices(["alu", "alui", "simd", "md", "cap", "wide", "ld", "st", "ldcap", "stcap",
-                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw"],
-                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2])[0]
+                       "ldrand", "br", "loop", "jal", "csr", "ill", "clc", "csc", "cjalr", "divw", "mulw"],
+                      [18, 12, 12, 3, 7, 3, 7, 6, 4, 4, 2, 6, 2, 2, 2, 1, 3, 3, 2, 2, 2])[0]
         if not allow_ctrl and k in ("br", "loop", "jal", "cjalr"):
             k = "alu"
         if k == "alu":
@@ -106,6 +106,19 @@ class Gen:
             self.emit(f"li r{ra}, {a}")
             self.emit(f"li r{rb}, {b}")
             self.emit(f"{r.choice(['div', 'divu', 'rem', 'remu'])} r{self.dst()}, r{ra}, r{rb}")
+        elif k == "mulw":           # multiplier passes: 32-bit chunks of edge patterns, chained products
+            ch = [0, 1, 0xFFFFFFFF, 0x80000000]
+            a = r.choice([self.val(), sum(r.choice(ch + [r.getrandbits(32)]) << (32 * j) for j in range(4))])
+            b = sum(r.choice(ch + [r.getrandbits(32)]) << (32 * j) for j in range(4))
+            ra, rb = self.dst(), self.dst()
+            if ra == rb or 0 in (ra, rb):
+                return
+            self.emit(f"li r{ra}, {a}")
+            self.emit(f"li r{rb}, {b}")
+            d = self.dst()
+            self.emit(f"{r.choice(['mul', 'mulhu'])} r{d}, r{ra}, r{rb}")
+            if r.random() < 0.5:
+                self.emit(f"{r.choice(['mul', 'mulhu'])} r{self.dst()}, r{d}, r{r.choice([ra, rb, d])}")
         elif k == "cap":
             f = r.choice([c for c in CAP_FUNCS if c != "cjalr"] + ["cincaddri", "csetbndi", "cseal", "cseal", "cunseal"])
             s1 = r.choice([60, 63, self.src(), self.src()])

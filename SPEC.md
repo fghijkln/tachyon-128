@@ -1,4 +1,4 @@
-# TACHYON-128 Instruction Set Architecture — v2.0
+# TACHYON-128 Instruction Set Architecture — v3.0
 
 > *"Faster than light, wider than life."*  A 128-bit load/store architecture with hardware
 > capabilities, in-register SIMD lanes and wide-immediate constant fusion.
@@ -446,4 +446,9 @@ These describe `rtl/` timing only; software must not depend on them.
   Latency = `ceil(n / bits_per_cycle) + 2` cycles (2 when `|a| < 2^(sig(|b|)−1)`), instant for divide-by-zero,
   0 extra for the paired `rem`/`div` on the same operands (result cache). v1 was radix-2 with dividend-only
   leading-zero skipping (up to 129 cycles).
-* **Multiplier:** radix-16 shift-add, 32 iterations for the full 256-bit product (unchanged).
+* **Multiplier (v3):** radix-2^32 multi-pass multiplier. Each cycle one 128 × 32 partial-product array (reduced
+  carry-save by synthesis) is added to the upper half of a 256-bit accumulator, which then shifts right by 32;
+  four passes produce the full 256-bit product and the last pass writes the result cache directly.
+  Latency = 6 cycles in EX (1 issue + 4 passes + 1 result), v2's radix-16 shift-add needed 35. `mul`/`mulhu` on
+  the same operands still share one computation (result cache: the second one costs 0 extra cycles).
+  `+define+TX_MUL_BITS=4` rebuilds the v2 radix-16 datapath (any divisor of 128 is a legal pass width).

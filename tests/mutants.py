@@ -33,6 +33,10 @@ MUTANTS = [
     ("div_early_term_off_by_one", "tx_muldiv.sv", "{1'b0, lz} + 9'd1);", "{1'b0, lz} + 9'd0);"),
     ("irq_ignores_tie", "tx_core.sv", "irq_pend  = csr_status[0] & csr_status[2] &", "irq_pend  = csr_status[0] &"),
     ("mtime_counts_traps", "tx_core.sv", "if (mem_v && !exmem_trap) mtime_q <=", "if (mem_v) mtime_q <="),
+    # ---- v3 features
+    ("mul_pass_drops_carry", "tx_muldiv.sv", "acc_nx = {mstep, acc[127:MUL_BITS]};",
+     "acc_nx = {1'b0, mstep[126+MUL_BITS:0], acc[127:MUL_BITS]};"),
+    ("mul_last_pass_stale", "tx_muldiv.sv", "c_hi <= acc_nx[255:128];", "c_hi <= acc[255:128];"),
     ("irq_store_not_squashed", "tx_core.sv", "assign dmem_we    = mem_v & exmem_store", "assign dmem_we    = exmem_valid & exmem_store"),
 ]
 

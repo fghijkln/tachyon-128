@@ -93,6 +93,25 @@ def tests():
             body.append(f"        li r4, {a}\n        li r5, {b}\n        {op} r{10 + k % 40}, r4, r5")
             body.append(f"        neg r6, r4\n        {['div', 'rem'][k % 2]} r{50 + k % 8}, r6, r5")
         T[f"md_div_widths{part}"] = PRE + "\n".join(body) + "\n" + POST
+    # multiplier (v3, 4 passes of 128x32): operands whose 32-bit multiplier chunks hit edge patterns
+    # (zero / all-ones chunks, carries rippling across every pass boundary), dependent chains,
+    # mul<->mulhu result-cache pairs, and a mul aborted by an older trap / interrupted
+    r = random.Random(91)
+    chunks = [0, 1, 0xFFFFFFFF, 0x80000000, 0x7FFFFFFF]
+    for part in range(2):
+        body = []
+        for k in range(18):
+            a = r.choice([M, 1 << 127, r.getrandbits(128), (1 << 96) - 1, 0xFFFFFFFF, 3])
+            b = sum(r.choice(chunks + [r.getrandbits(32)]) << (32 * j) for j in range(4))
+            if k % 6 == 0:
+                a, b = b, a
+            op = ["mul", "mulhu"][k % 2]
+            body.append(f"        li r4, {a}\n        li r5, {b}\n        {op} r{10 + k}, r4, r5")
+            if k % 3 == 0:
+                body.append(f"        {['mulhu', 'mul'][k % 2]} r{30 + k}, r4, r5")   # cache hit
+            if k % 4 == 1:
+                body.append(f"        mul r6, r{10 + k}, r5\n        mulhu r7, r6, r{10 + k}")  # dependent chain
+        T[f"md_mul_passes{part}"] = PRE + "\n".join(body) + "\n" + POST
     for i, base in enumerate(SIMD_FUNCS):
         for suf in LANE_SUFFIX:
             if base == "vmul" and suf == "d":
@@ -362,6 +381,25 @@ ok:     ld r10, 0(r4)
         addi r10, r10, 1
 skip:   divu r11, r5, r0        # divide by zero (instant)
         rem r12, r5, r0
+        halt zero
+handler: addi r53, r53, 1
+        csrr r51, epc
+        addi r51, r51, 4
+        csrw epc, r51
+        eret
+"""
+    T["haz_mul_abort"] = PRE + """
+        la r4, handler
+        csrw tvec, r4
+        li r5, -1
+        li r6, 0x123456789abcdef0123456789abcdef
+        mul r8, r5, r6          # completes
+        ld r7, 3(r0)            # misaligned: traps in MEM while the next mul is mid-flight in EX
+        mul r9, r6, r6
+        mulhu r10, r6, r6       # after the trap: must recompute, not see a stale half-finished product
+        mul r11, r9, r10
+        mul r12, r11, r11
+        mulhu r13, r11, r11
         halt zero
 handler: addi r53, r53, 1
         csrr r51, epc
